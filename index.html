@@ -279,6 +279,9 @@
     <span class="label">Join Voice</span></button>
   <button class="btn ptt keep-label" id="ptt" hidden>
     <span class="ptt-dot"></span><span class="label"><span class="lbl-wide">Hold to talk</span><span class="lbl-narrow">Talk</span></span></button>
+  <span class="sep"></span>
+  <button class="btn keep-label" id="addUser">+ Add user</button>
+  <button class="btn keep-label" id="delUser">− Remove</button>
 </nav>
 
 <div id="gate">
@@ -589,13 +592,71 @@ function LocalTransport() {
   };
 }
 
+/* ------------------------------------------------------------------
+   DEV ONLY — synthetic peers, for exercising how the fire scales without
+   opening a dozen tabs. This wrapper sits in front of the real transport:
+   the bots exist in this tab's roster and nowhere else, and every genuine
+   peer still arrives through the transport underneath, untouched.
+
+   This lives on `develop` only. Shipping it would mean the demo showed
+   people who are not there.
+------------------------------------------------------------------ */
+const BOT_NAMES = ["mira","juno","tobias","wren","sable","kofi","noor","dash",
+                   "opal","reyes","ivy","bram","suri","cass","lyle","nyx"];
+
+function withDevCrowd(inner) {
+  const bus  = Emitter();
+  const bots = [];
+  let real = [], seq = 0;
+
+  const merged = () => [...real, ...bots];
+  const push   = () => bus.emit("presence", merged());
+
+  inner.on("presence", (list) => { real = list; push(); });
+  inner.on("message",  (m) => bus.emit("message", m));
+  inner.on("voice",    (v) => bus.emit("voice", v));
+  inner.on("status",   (v) => bus.emit("status", v));
+  inner.on("signal",   (v) => bus.emit("signal", v));
+  inner.on("joined",   (v) => bus.emit("joined", v));
+  inner.on("denied",   (v) => bus.emit("denied", v));
+
+  return {
+    on: bus.on,
+    users: merged,
+    join:     (nick, opts) => inner.join(nick, opts),
+    say:      (text) => inner.say(text),
+    setVoice: (on)   => inner.setVoice(on),
+    // Voice needs these to reach the real transport, or it dies silently here.
+    id:       inner.id     ? () => inner.id()               : undefined,
+    signal:   inner.signal ? (to, d) => inner.signal(to, d) : undefined,
+
+    addBot() {
+      const taken = new Set(merged().map((u) => u.name));
+      const name  = BOT_NAMES.find((n) => !taken.has(n)) || "guest" + bots.length;
+      // Bots never claim voice: Voice.sync would try to dial something that
+      // cannot answer, leaving a dead peer connection behind each one.
+      bots.push({ id: "bot:" + (++seq), name, self: false, voice: false });
+      push();
+      bus.emit("message", { id: "s" + seq, userId: "bot:" + seq, system: true,
+                            text: `${name} joined the circle` });
+    },
+    removeBot() {
+      const bot = bots.pop();
+      if (!bot) return;
+      push();
+      bus.emit("message", { id: "s" + (++seq), userId: bot.id, system: true,
+                            text: `${bot.name} slipped into the dark` });
+    }
+  };
+}
+
 function createTransport() {
   if (ROOM_SERVER) return SocketTransport(ROOM_SERVER);
   if ("BroadcastChannel" in window) return ChannelTransport();
   return LocalTransport();
 }
 
-const net = createTransport();
+const net = withDevCrowd(createTransport());
 
 /* ==================================================================
    2. AUDIO — everything is synthesised, no asset files
@@ -1723,6 +1784,10 @@ toggle($("#tFire"),     (on) => Audio_.bedOn("fire", on));
 toggle($("#tWind"),     (on) => Audio_.bedOn("wind", on));
 toggle($("#tCrickets"), (on) => Audio_.bedOn("crickets", on));
 toggle($("#tWaves"),    (on) => Audio_.bedOn("waves", on));
+
+/* --- dev crowd controls (develop branch only) --- */
+$("#addUser").addEventListener("click", () => net.addBot());
+$("#delUser").addEventListener("click", () => net.removeBot());
 
 /* Is the caret in a text field? Space belongs to that field if so. */
 function typing() {
