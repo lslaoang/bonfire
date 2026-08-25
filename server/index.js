@@ -4,6 +4,9 @@
  * at most a few dozen people, so diffing is premature. Nothing is persisted
  * and there is no backfill, so a restart simply empties every circle — which
  * is the same thing that happens when everyone walks away from a real fire.
+ *
+ * It also routes WebRTC signalling between pairs of peers, but never carries
+ * voice audio: that goes directly peer to peer.
  */
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
@@ -59,6 +62,16 @@ wss.on("connection", (ws, req) => {
     }
 
     if (!me.name) return;                      // must join before saying anything
+
+    if (m.t === "signal") {
+      // WebRTC signalling: opaque to us, routed to exactly one recipient.
+      // The relay never sees or carries the audio itself.
+      const target = room.get(m.to);
+      if (target && target.ws.readyState === 1) {
+        target.ws.send(JSON.stringify({ t: "signal", from: me.id, data: m.data }));
+      }
+      return;
+    }
 
     if (m.t === "bye") {
       // A closing page tells us directly. Proxies do not always forward a

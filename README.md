@@ -45,11 +45,13 @@ To add a feature, hang it off `I`. Don't add another counter.
   and it binds across machines.
 - **Ambient beds** — crackling fire, wind and crickets, independently
   toggleable.
-- **Fading chat** — messages drift up, blur and dissolve like smoke. Nothing
-  is persisted and late joiners see nothing; that's the product, not a
-  limitation.
-- **Voice toggle** — real `getUserMedia`, drives a ring around your silhouette
-  from an analyser node. Mic audio is never routed back to output.
+- **Fading chat** — messages hold for ~9s, then drift up, blur and dissolve
+  like smoke, gone by 12.5s. Tune `SAY_LIFE` and `SAY_FADE` in `index.html`.
+  Nothing is persisted and late joiners see nothing; that's the product, not
+  a limitation.
+- **Voice** — real peer-to-peer audio over WebRTC. Each person's ring pulses
+  with what you are actually hearing from them. Your own mic is analysed but
+  never routed to your own output, which is how you avoid a feedback loop.
 - **Auto-hiding UI** — chrome fades after 3s idle, and won't hide mid-sentence.
 
 ## Connecting people
@@ -88,6 +90,26 @@ happens when everyone walks away from a real fire.
 host that supports WebSockets works — the relay is plain Node with one
 dependency. Note that a page served over `https://` can only connect to a
 `wss://` relay, not `ws://`.
+
+### Voice
+
+Voice is a **WebRTC mesh**. The relay routes the signalling — offers, answers
+and ICE candidates, opaque to it — and then audio flows directly between
+browsers and never touches the server.
+
+A mesh is n(n-1)/2 connections, so it is the right shape for a small circle
+and the wrong one for a crowd. Past roughly six simultaneous speakers the
+per-person uplink is the reason to put an SFU (LiveKit, mediasoup) in the
+middle instead. Presence and chat would not change: only `Voice` would.
+
+Connections are reconciled against the roster on every presence update, so
+joining, leaving and muting are all one code path. Of any two peers the lower
+id places the call, so both sides never offer at once.
+
+**Known limit:** only public STUN servers are configured, no TURN. On most
+home and office networks that is enough, but symmetric NAT and strict
+corporate firewalls will fail to connect, and there is no free TURN worth
+relying on. Adding one is a config change in `ICE_SERVERS`.
 
 ### Rooms
 
@@ -189,7 +211,11 @@ The raw file is deliberately **not** committed — see `.gitignore`.
 
 ## Debugging
 
-`window.bonfire` exposes `net`, `audio`, `users()` and `intensity()`.
+`window.bonfire` exposes `net`, `audio`, `voice`, `users()` and `intensity()`.
+
+To exercise voice without a microphone, stub `getUserMedia` with a synthetic
+stream from `AudioContext.createMediaStreamDestination()` — it is a real
+`MediaStream`, so the whole WebRTC path runs for real.
 
 ## Licence
 

@@ -409,6 +409,7 @@ function SocketTransport(url, room) {
       try { m = JSON.parse(e.data); } catch { return; }
       switch (m.t) {
         case "welcome":  myId = m.id; break;
+        case "signal":   bus.emit("signal", { from: m.from, data: m.data }); break;
         case "presence": bus.emit("presence",
                            m.users.map((u) => ({ ...u, self: u.id === myId }))); break;
         case "message":  bus.emit("message", m); break;
@@ -436,9 +437,11 @@ function SocketTransport(url, room) {
   return {
     on: bus.on,
     users: () => [],
+    id: () => myId,
     join(n)      { nick = n; send("join", { nick: n, voice }); },
     say(text)    { const b = (text || "").trim(); if (b) send("say", { text: b }); },
-    setVoice(on) { voice = on; send("voice", { on }); }
+    setVoice(on) { voice = on; send("voice", { on }); },
+    signal(to, data) { send("signal", { to, data }); }
   };
 }
 
@@ -712,6 +715,143 @@ const Audio_ = {
 };
 
 /* ==================================================================
+   2b. VOICE — real peer-to-peer audio, signalled over the relay.
+
+   A full mesh: every pair of speakers holds one RTCPeerConnection, which is
+   n(n-1)/2 connections and the right shape only for a small circle. Past
+   roughly six voices the per-person uplink is the reason to put an SFU in
+   the middle instead. For a handful of people round a fire, a mesh needs no
+   extra infrastructure at all — the relay already carrying presence carries
+   the signalling, and the audio never touches it.
+================================================================== */
+const ICE_SERVERS = [
+  { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }
+];
+
+const Voice = {
+  on: false,
+  stream: null,
+  peers: new Map(),           // peerId -> { pc, audio, analyser, data, level }
+
+  supported() { return typeof net.signal === "function" && !!window.RTCPeerConnection; },
+
+  async enable() {
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    this.on = true;
+    this.sync();
+  },
+
+  disable() {
+    this.on = false;
+    if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+    for (const id of [...this.peers.keys()]) this.hangUp(id);
+  },
+
+  /* Reconcile connections against the roster: hold one to everyone who has
+     voice on, and to nobody else. Called on every presence update, so people
+     arriving, leaving or muting are all the same code path. */
+  sync() {
+    if (!this.supported()) return;
+    const want = new Set(this.on
+      ? users.filter((u) => !u.self && u.voice).map((u) => u.id)
+      : []);
+    for (const id of [...this.peers.keys()]) if (!want.has(id)) this.hangUp(id);
+    for (const id of want) if (!this.peers.has(id)) this.dial(id);
+  },
+
+  peer(id) {
+    const existing = this.peers.get(id);
+    if (existing) return existing;
+
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const p = { pc, audio: null, analyser: null, data: null, level: 0 };
+    this.peers.set(id, p);
+
+    if (this.stream) for (const t of this.stream.getTracks()) pc.addTrack(t, this.stream);
+    pc.onicecandidate = (e) => { if (e.candidate) net.signal(id, { candidate: e.candidate }); };
+    pc.ontrack = (e) => this.attach(p, e.streams[0]);
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") this.hangUp(id);
+    };
+    return p;
+  },
+
+  /* Only one side may offer, or the two offers collide. The lower id calls;
+     the higher id builds its connection and waits to be called. */
+  async dial(id) {
+    const p = this.peer(id);
+    const mine = net.id();
+    if (!mine || mine > id) return;
+    try {
+      await p.pc.setLocalDescription(await p.pc.createOffer());
+      net.signal(id, { sdp: p.pc.localDescription });
+    } catch (err) { this.hangUp(id); }
+  },
+
+  async onSignal(from, data) {
+    if (!this.on || !data) return;
+    const p = this.peer(from);
+    try {
+      if (data.sdp) {
+        await p.pc.setRemoteDescription(data.sdp);
+        if (data.sdp.type === "offer") {
+          await p.pc.setLocalDescription(await p.pc.createAnswer());
+          net.signal(from, { sdp: p.pc.localDescription });
+        }
+      } else if (data.candidate) {
+        await p.pc.addIceCandidate(data.candidate);
+      }
+    } catch (err) { /* candidate raced ahead of the description; ICE retries */ }
+  },
+
+  /* Play through an <audio> element — the path that works in every browser —
+     and tap the same stream with an analyser only to drive that person's
+     ring. The analyser is deliberately not wired to the destination, or you
+     would hear them twice. */
+  attach(p, stream) {
+    if (!stream) return;
+    const el = new Audio();
+    el.srcObject = stream;
+    el.autoplay = true;
+    el.play().catch(() => { /* needs a gesture; the toggle itself was one */ });
+    p.audio = el;
+
+    if (Audio_.ctx) {
+      const an = Audio_.ctx.createAnalyser();
+      an.fftSize = 256;
+      Audio_.ctx.createMediaStreamSource(stream).connect(an);
+      p.analyser = an;
+      p.data = new Uint8Array(an.frequencyBinCount);
+    }
+  },
+
+  hangUp(id) {
+    const p = this.peers.get(id);
+    if (!p) return;
+    try { p.pc.close(); } catch (err) { /* already closed */ }
+    if (p.audio) { p.audio.srcObject = null; p.audio = null; }
+    this.peers.delete(id);
+  },
+
+  /* How loud is this peer right now, 0..1, or null if we have no audio yet. */
+  levelOf(id) {
+    const p = this.peers.get(id);
+    if (!p || !p.analyser) return null;
+    p.analyser.getByteTimeDomainData(p.data);
+    let sum = 0;
+    for (let i = 0; i < p.data.length; i++) {
+      const v = (p.data[i] - 128) / 128;
+      sum += v * v;
+    }
+    p.level = clamp(Math.sqrt(sum / p.data.length) * 6, 0, 1);
+    return p.level;
+  }
+};
+
+/* ==================================================================
    3. SCENE — canvas fire, embers, smoke, seated silhouettes
 ================================================================== */
 const cv  = $("#scene");
@@ -841,7 +981,12 @@ function drawFigure(u, t) {
 
   // voice ring — pulses with mic level for you, gently for others
   if (u.voice) {
-    const amp = u.self ? micLevel : (0.25 + 0.25 * Math.sin(t * 2.3 + phase));
+    // Real level where we have their audio; a gentle idle pulse until then,
+    // so a connecting peer still reads as "in voice".
+    const heard = u.self ? micLevel : Voice.levelOf(u.id);
+    const amp = heard !== null && heard !== undefined
+      ? heard
+      : (0.18 + 0.14 * Math.sin(t * 2.3 + phase));
     const r = 34 * s + amp * 16 * s;
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
@@ -1087,11 +1232,11 @@ function drawStars(t) {
 const smokeLayer = $("#smoke");
 let byId = new Map();   // id -> live user, rebuilt on every presence update
 const says = [];
-const SAY_LIFE = 7.5;   // seconds a chat line lingers
-const SYS_LIFE = 4.2;   // joins/leaves clear out faster
-const SAY_FADE = 3.0;   // last N seconds spent dissolving
-const SAY_MAX  = 6;     // start hurrying the oldest along past this
-const SAY_HARD = 10;    // hard ceiling — drop instantly past this
+const SAY_LIFE = 12.5;  // seconds a chat line lingers (9s solid, then dissolves)
+const SYS_LIFE = 6.5;   // joins/leaves clear out faster
+const SAY_FADE = 3.5;   // last N seconds spent dissolving
+const SAY_MAX  = 7;     // start hurrying the oldest along past this
+const SAY_HARD = 12;    // hard ceiling — drop instantly past this
 
 function addSay(msg) {
   const now = performance.now();
@@ -1182,8 +1327,15 @@ net.on("presence", (list) => {
   targetIntensity = intensityFor(users.length);
   Audio_.tune(targetIntensity);
   renderPresence();
+  Voice.sync();          // connect to new speakers, drop the ones who muted
 });
 net.on("message", addSay);
+net.on("signal", ({ from, data }) => Voice.onSignal(from, data));
+
+/* A note only you see. Errors about your own microphone are nobody else's
+   business, and broadcasting them put them in everyone's chat. */
+const localNote = (text) =>
+  addSay({ id: "local" + Date.now(), userId: null, system: true, text });
 
 /* --- join gate --- */
 $("#joinForm").addEventListener("submit", (e) => {
@@ -1218,32 +1370,45 @@ toggle($("#tWind"),     (on) => Audio_.bedOn("wind", on));
 toggle($("#tCrickets"), (on) => Audio_.bedOn("crickets", on));
 
 /* --- voice --- */
-let micStream = null, micAnalyser = null, micData = null;
+let micAnalyser = null, micData = null;
 toggle($("#tVoice"), async (on) => {
   const btn = $("#tVoice"), label = btn.querySelector(".label");
-  if (on) {
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-      });
-      Audio_.start();
-      const src = Audio_.ctx.createMediaStreamSource(micStream);
-      micAnalyser = Audio_.ctx.createAnalyser();
-      micAnalyser.fftSize = 512;
-      micData = new Uint8Array(micAnalyser.frequencyBinCount);
-      src.connect(micAnalyser);            // analyser only — never back to output
-      label.textContent = "Voice on";
-      net.setVoice(true);
-      pollMic();
-    } catch (err) {
-      btn.setAttribute("aria-pressed", "false");
-      net.say("(couldn't reach the microphone)");
-    }
-  } else {
-    if (micStream) micStream.getTracks().forEach((t) => t.stop());
-    micStream = micAnalyser = null; micLevel = 0;
+
+  if (!on) {
+    Voice.disable();
+    micAnalyser = micData = null;
+    micLevel = 0;
     label.textContent = "Join Voice";
     net.setVoice(false);
+    return;
+  }
+
+  if (!Voice.supported()) {
+    btn.setAttribute("aria-pressed", "false");
+    localNote("voice needs the relay — see the README");
+    return;
+  }
+
+  try {
+    Audio_.start();
+    await Voice.enable();
+
+    // Your own level, for your own ring. Analyser only: routing your mic to
+    // the output is how you build a feedback loop.
+    micAnalyser = Audio_.ctx.createAnalyser();
+    micAnalyser.fftSize = 512;
+    micData = new Uint8Array(micAnalyser.frequencyBinCount);
+    Audio_.ctx.createMediaStreamSource(Voice.stream).connect(micAnalyser);
+
+    label.textContent = "Voice on";
+    net.setVoice(true);                 // tells everyone else to dial us
+    pollMic();
+  } catch (err) {
+    Voice.disable();
+    btn.setAttribute("aria-pressed", "false");
+    localNote(err && err.name === "NotAllowedError"
+      ? "microphone permission denied"
+      : "couldn't reach the microphone");
   }
 });
 function pollMic() {
@@ -1281,6 +1446,7 @@ addEventListener("keydown", (e) => {
 window.bonfire = {
   net,
   audio:     Audio_,
+  voice:     Voice,
   users:     () => users,
   intensity: () => ({ now: intensity, target: targetIntensity, scale: fire.scale })
 };
