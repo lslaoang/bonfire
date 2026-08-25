@@ -6,10 +6,13 @@ it, and shrinks back down when they leave.
 
 **Live demo → https://lslaoang.github.io/bonfire/**
 
-**Open it in two tabs and you will see two people at the fire**, chatting with
-each other and making the flames grow. That is real shared presence, not a
-simulation — it is just confined to one browser until a relay is deployed
-(see *Connecting people* below).
+**It is live and shared.** Open it and you are in the same circle as everyone
+else who has it open — real presence, real messages, one fire that grows with
+the crowd. Nothing is simulated and nothing is padded.
+
+The relay runs on a free tier and sleeps when the fire goes out, so the first
+person to arrive after a quiet spell waits while it wakes. The page says
+*finding the others…* rather than pretending the clearing is empty.
 
 ---
 
@@ -66,9 +69,19 @@ Then point the client at it — in `index.html`:
 const ROOM_SERVER = "ws://localhost:8080";     // wss:// once deployed
 ```
 
-The relay is ~90 lines of Node and `ws`. It owns the roster and broadcasts it
-whole, persists nothing, and pings every 30s so proxies do not silently drop
-idle connections. A restart empties every circle, which is roughly what
+The deployed relay for this site lives at `wss://bonfire-relay.onrender.com`.
+
+The relay is ~100 lines of Node and `ws`. It owns the roster and broadcasts it
+whole and persists nothing.
+
+Departure is handled twice over, because it has to be. A proxy in front of the
+relay will not always forward a client's close frame promptly — measured at
+10.2s against this deployment, with the ping sweep putting the worst case at
+30s, during which the departed are still sitting at the fire. So the page
+sends an explicit `bye` on `pagehide` and the relay acts on it at once
+(measured 0.19s), and the 10s ping sweep is left as the safety net for
+clients that crash without saying anything. Leaving is idempotent, so the
+two paths cannot double-announce. A restart empties every circle, which is roughly what
 happens when everyone walks away from a real fire.
 
 `render.yaml` in the repo root deploys it to Render's free tier as-is. Any

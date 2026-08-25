@@ -1156,12 +1156,19 @@ function positionSays(now) {
 /* A relay on a free tier sleeps, and waking it takes the better part of a
    minute. Say so, rather than showing an empty clearing and looking broken. */
 let linkState = ROOM_SERVER ? "connecting" : "online";
+let seated = false;                    // have we actually joined the circle?
 
 function renderPresence() {
-  const n = users.length;
   const el = $("#presence");
-  if (linkState === "connecting" && !n) { el.textContent = "finding the others…"; return; }
-  if (linkState === "offline")          { el.textContent = "reconnecting…"; return; }
+  if (linkState === "offline") { el.textContent = "reconnecting…"; return; }
+  if (!seated) {
+    // Nothing is counted until you sit down: the relay does not tell a
+    // client who is present until it joins, so any number here would be a
+    // guess. Report the connection instead.
+    el.textContent = linkState === "connecting" ? "finding the others…" : "";
+    return;
+  }
+  const n = users.length;
   el.textContent = n === 1 ? "1 person at the fire" : `${n} people at the fire`;
 }
 
@@ -1184,6 +1191,7 @@ $("#joinForm").addEventListener("submit", (e) => {
   const nick = ($("#nick").value || "").trim().slice(0, 18) || "wanderer";
   Audio_.start();                // must happen inside a user gesture
   Audio_.bedOn("fire", true);
+  seated = true;
   net.join(nick);
   $("#gate").classList.add("gone");
   setTimeout(() => { $("#gate").style.display = "none"; $("#say").focus(); }, 900);
