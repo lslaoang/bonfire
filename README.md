@@ -245,6 +245,17 @@ Fireplace Sound"* by **SoundsForYou**, via Pixabay, used under the
 Attribution is not required by that licence; it's here because it's decent.
 The raw file is deliberately **not** committed — see `.gitignore`.
 
+## Icons
+
+The tab icon and the iOS home-screen icon are both inlined into `index.html`
+— an SVG data URI for the favicon, a 180x180 PNG for `apple-touch-icon`. A
+`favicon.ico` sibling would 404 when the page is opened straight off disk,
+and the single-file property is worth more here than the few kilobytes.
+
+The home-screen icon is deliberately square with no rounded corners: iOS
+applies its own mask, and a pre-rounded icon ends up double-rounded with dark
+wedges in the corners.
+
 ## Debugging
 
 `window.bonfire` exposes `net`, `audio`, `voice`, `users()` and `intensity()`.
