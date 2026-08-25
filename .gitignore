@@ -1,0 +1,11 @@
+# Source recordings are inlined into index.html by embed-fire.py, not shipped
+# as loose files: the Pixabay Content License forbids distributing content
+# "on a Standalone basis". Keep your working copies out of git.
+*.mp3
+*.wav
+*.ogg
+*.m4a
+*.flac
+*.aac
+
+.DS_Store
