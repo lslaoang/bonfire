@@ -43,15 +43,18 @@ To add a feature, hang it off `I`. Don't add another counter.
   nothing is padded out with fake participants.
 - **Shared presence** — tabs bind to each other out of the box; add the relay
   and it binds across machines.
-- **Ambient beds** — crackling fire, wind and crickets, independently
-  toggleable.
+- **Ambient beds** — crackling fire, wind, crickets and ocean surf,
+  independently toggleable. All synthesised; the only audio file is the
+  optional campfire recording.
 - **Fading chat** — messages hold for ~9s, then drift up, blur and dissolve
   like smoke, gone by 12.5s. Tune `SAY_LIFE` and `SAY_FADE` in `index.html`.
   Nothing is persisted and late joiners see nothing; that's the product, not
   a limitation.
-- **Voice** — real peer-to-peer audio over WebRTC. Each person's ring pulses
-  with what you are actually hearing from them. Your own mic is analysed but
-  never routed to your own output, which is how you avoid a feedback loop.
+- **Push-to-talk voice** — real peer-to-peer audio over WebRTC. Hold **Space**
+  (or the *Hold to talk* pad) to open your mic; it is closed the rest of the
+  time. Each person's ring pulses with what you are actually hearing.
+- **Private circles** — open one with a shared key and it is reachable only
+  by people who know that key.
 - **Auto-hiding UI** — chrome fades after 3s idle, and won't hide mid-sentence.
 
 ## Connecting people
@@ -106,15 +109,48 @@ Connections are reconciled against the roster on every presence update, so
 joining, leaving and muting are all one code path. Of any two peers the lower
 id places the call, so both sides never offer at once.
 
+Voice is **push-to-talk**: joining voice establishes the connections but
+leaves your outgoing track disabled. Holding Space — or the *Hold to talk*
+pad, which is the only route on a phone — enables it. Gating the track rather
+than the connection keeps the peer link warm, so the first syllable is not
+clipped. The mic is force-closed on blur, on tab hide, and whenever the caret
+is in a text field, because a live microphone nobody realises is open is the
+worst way this can fail. That is also why joining does **not** focus the chat
+box: a focused field would swallow the spacebar. Press `/` to type.
+
 **Known limit:** only public STUN servers are configured, no TURN. On most
 home and office networks that is enough, but symmetric NAT and strict
 corporate firewalls will fail to connect, and there is no free TURN worth
 relying on. Adding one is a config change in `ICE_SERVERS`.
 
-### Rooms
+### Rooms and private circles
 
-`?room=porch` is a different fire from the default. Rooms are created on
-demand and disappear when the last person leaves.
+`?room=porch` is a different, unlisted fire. Anyone who knows the name can
+walk up to it.
+
+A **private circle** is stronger. Enter a shared key on the join screen and
+the key is stretched with PBKDF2 (150k iterations, SHA-256), then the digest
+is split: the first 64 bits name the room, the remaining 192 prove you know
+the key. The relay only ever sees those two halves, never the key itself, and
+an empty circle forgets its key entirely.
+
+Two properties worth understanding:
+
+- **A wrong key is not rejected — it opens a different circle.** Because the
+  room id is derived from the key, a mistyped key lands you somewhere else
+  entirely, which is indistinguishable from an empty circle. That is
+  deliberate: it gives an attacker no oracle to test guesses against. It is
+  also confusing if you simply typed it wrong, so the page says something
+  when a private circle stays empty.
+- **The stored proof still matters.** It stops anyone who learns a room id
+  some other way — a log, a proxy, a screenshot — from walking in without
+  the key.
+
+Keys are only as strong as the passphrase. PBKDF2 makes guessing expensive
+but a short or common key is still guessable offline by anyone holding the
+room id. Use a few unrelated words.
+
+Rooms are created on demand and disappear when the last person leaves.
 
 ## Branches
 

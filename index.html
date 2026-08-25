@@ -97,6 +97,20 @@
   .btn .ico { width: 15px; height: 15px; display: block; flex: none; }
   .btn .ico [fill="none"] { stroke: currentColor; }
   .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+  .btn[hidden] { display: none; }
+
+  /* Push to talk: dark and quiet until held, then unmistakably live. */
+  .ptt { border: 1px solid rgba(255,138,43,.35); }
+  .ptt-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex: none;
+    background: rgba(232,221,208,.3);
+    transition: background 120ms, box-shadow 120ms;
+  }
+  .ptt.talking {
+    color: #1a1208; background: var(--ember);
+    box-shadow: 0 0 22px rgba(255,138,43,.45);
+  }
+  .ptt.talking .ptt-dot { background: #2a1608; box-shadow: 0 0 8px rgba(0,0,0,.4); }
 
   /* ---- Composer -------------------------------------------------- */
   #composer {
@@ -177,11 +191,29 @@
   .gate-card button:hover { filter: brightness(1.06); box-shadow: 0 10px 38px rgba(255,120,30,.34); }
   .gate-card button:active { transform: translateY(1px); }
   .hint { margin-top: 22px; font-size: 11px; letter-spacing: .1em; color: rgba(232,221,208,.28); }
+  .linkish {
+    margin-top: 16px; background: none; border: 0; cursor: pointer;
+    color: rgba(232,221,208,.42); font: inherit; font-size: 12px;
+    letter-spacing: .05em; text-decoration: underline;
+    text-underline-offset: 3px; text-decoration-color: rgba(232,221,208,.2);
+    transition: color 180ms;
+  }
+  .linkish:hover { color: var(--ash); }
+  .gate-error {
+    min-height: 16px; margin-top: 12px; font-size: 12px; letter-spacing: .03em;
+    color: #ff9a6b; opacity: 0; transition: opacity 240ms;
+  }
+  .gate-error.show { opacity: 1; }
+  .gate-card button[disabled] { opacity: .6; cursor: progress; }
 
   @media (max-width: 560px) {
     #dock { gap: 2px; padding: 6px; bottom: 16px; }
     .btn { padding: 0 10px; font-size: 11.5px; }
     .btn .label { display: none; }
+    /* Push to talk keeps its label everywhere: on a phone there is no
+       spacebar, so this pad is the only way to speak. */
+    .btn.keep-label .label { display: inline; }
+    .ptt { padding: 0 14px; }
     #composer { bottom: 68px; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -201,7 +233,7 @@
 </header>
 
 <form id="composer" class="chrome" autocomplete="off">
-  <input id="say" type="text" maxlength="180" placeholder="say something into the fire…" aria-label="Message" />
+  <input id="say" type="text" maxlength="180" placeholder="press / to say something into the fire…" aria-label="Message" />
 </form>
 
 <nav id="dock" class="chrome" aria-label="Room controls">
@@ -214,10 +246,15 @@
   <button class="btn" id="tCrickets" aria-pressed="false">
     <svg class="ico" viewBox="0 0 16 16" fill="none" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><ellipse cx="8" cy="9.6" rx="2.6" ry="4"/><path d="M6.6 5.6 4.4 2.4M9.4 5.6l2.2-3.2"/><path d="M5.4 8 2.6 9.4M10.6 8l2.8 1.4M5.6 11.4l-2.4 2M10.4 11.4l2.4 2"/></svg>
     <span class="label">Crickets</span></button>
+  <button class="btn" id="tWaves" aria-pressed="false">
+    <svg class="ico" viewBox="0 0 16 16" fill="none" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.4 10.2c1.1 0 1.1-1.5 2.2-1.5s1.1 1.5 2.2 1.5 1.1-1.5 2.2-1.5 1.1 1.5 2.2 1.5 1.1-1.5 2.2-1.5 1.1 1.5 2.2 1.5"/><path d="M1.4 13.4c1.1 0 1.1-1.5 2.2-1.5s1.1 1.5 2.2 1.5 1.1-1.5 2.2-1.5 1.1 1.5 2.2 1.5 1.1-1.5 2.2-1.5 1.1 1.5 2.2 1.5"/><path d="M4.6 6.1a3.4 3.4 0 0 1 6.5-1"/></svg>
+    <span class="label">Ocean</span></button>
   <span class="sep"></span>
   <button class="btn" id="tVoice" aria-pressed="false">
     <svg class="ico" viewBox="0 0 16 16" fill="none" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><rect x="6" y="1.4" width="4" height="7.6" rx="2"/><path d="M3.4 7.6a4.6 4.6 0 0 0 9.2 0"/><path d="M8 12.2v2.4"/></svg>
     <span class="label">Join Voice</span></button>
+  <button class="btn ptt keep-label" id="ptt" hidden>
+    <span class="ptt-dot"></span><span class="label">Hold to talk</span></button>
 </nav>
 
 <div id="gate">
@@ -226,8 +263,12 @@
     <p>Pull up a log. Stay as long as you like.</p>
     <form id="joinForm">
       <input id="nick" type="text" maxlength="18" placeholder="your name" aria-label="Nickname" />
-      <button type="submit">Join the circle</button>
+      <input id="roomKey" type="password" maxlength="64" placeholder="shared key"
+             aria-label="Private circle key" autocomplete="off" hidden />
+      <button type="submit" id="joinBtn">Join the circle</button>
     </form>
+    <button type="button" id="privToggle" class="linkish">or open a private circle</button>
+    <div class="gate-error" id="gateError" role="alert"></div>
     <div class="hint">Audio starts when you sit down · headphones recommended</div>
   </div>
 </div>
@@ -281,6 +322,23 @@ const ROOM_ID = new URLSearchParams(location.search).get("room") || "main";
    — real sessions and real messages, just confined to one device. */
 const ROOM_SERVER = "wss://bonfire-relay.onrender.com";
 
+/* A private circle is derived entirely from its key. PBKDF2 stretches the
+   key, then the digest is split: the first half names the room, the second
+   half proves you know the key. The relay only ever sees those halves, never
+   the key itself, and knowing a room id does not yield the proof half
+   without brute-forcing the key — so a long passphrase matters. */
+async function deriveCircle(key) {
+  const enc = new TextEncoder();
+  const material = await crypto.subtle.importKey(
+    "raw", enc.encode(key), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: enc.encode("bonfire/circle/v1"),
+      iterations: 150000, hash: "SHA-256" },
+    material, 256);
+  const hex = [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return { room: "p-" + hex.slice(0, 16), keyHash: hex.slice(16) };
+}
+
 const BEAT_MS  = 2000;   // presence heartbeat
 const STALE_MS = 6500;   // drop a peer we have not heard from in this long
 
@@ -292,15 +350,15 @@ const STALE_MS = 6500;   // drop a peer we have not heard from in this long
    heartbeat continuously, so a tab that crashes without saying goodbye
    still ages out of everyone else's roster instead of haunting it.
 ------------------------------------------------------------------ */
-function ChannelTransport(room) {
+function ChannelTransport() {
   const bus   = Emitter();
-  const ch    = new BroadcastChannel("bonfire:" + room);
   const me    = { id: uid(), name: "", voice: false };
+  let   ch    = null;                      // opened once we know which circle
   const peers = new Map();                 // id -> { id, name, voice, seen }
   let seq = 0, joined = false;
 
   const pub  = () => ({ id: me.id, name: me.name, voice: me.voice });
-  const send = (t, extra) => ch.postMessage({ t, from: me.id, ...extra });
+  const send = (t, extra) => { if (ch) ch.postMessage({ t, from: me.id, ...extra }); };
 
   const roster = () => [
     { id: me.id, name: me.name, self: true, voice: me.voice },
@@ -318,7 +376,7 @@ function ChannelTransport(room) {
     else if (known.name !== u.name || known.voice !== !!u.voice) push();
   }
 
-  ch.onmessage = (e) => {
+  const listen = (e) => {
     const m = e.data;
     if (!joined || !m || m.from === me.id) return;
     switch (m.t) {
@@ -347,9 +405,14 @@ function ChannelTransport(room) {
     on: bus.on,
     users: roster,
 
-    join(nick) {
+    join(nick, opts) {
+      // The channel name is the room, so a private circle is simply a channel
+      // nobody without the key can name.
+      ch = new BroadcastChannel("bonfire:" + ((opts && opts.room) || "main"));
+      ch.onmessage = listen;
       me.name = nick;
       joined  = true;
+      bus.emit("joined", {});
       push();
       sys(me.id, `${nick} joined the circle`);
       send("hello", { u: pub() });
@@ -389,9 +452,12 @@ function ChannelTransport(room) {
    never decides who is present. Reconnects with backoff, and re-announces
    itself on the way back up so a dropped connection self-heals.
 ------------------------------------------------------------------ */
-function SocketTransport(url, room) {
+function SocketTransport(url) {
   const bus = Emitter();
   let ws = null, myId = null, nick = null, voice = false, backoff = 500, leaving = false;
+  let room = null, keyHash = null, admitted = false;
+
+  const announce = () => send("join", { nick, room, keyHash, voice });
 
   const send = (t, extra) =>
     ws && ws.readyState === 1 && ws.send(JSON.stringify({ t, ...extra }));
@@ -400,9 +466,12 @@ function SocketTransport(url, room) {
 
   (function connect() {
     status("connecting");
-    ws = new WebSocket(url + (url.includes("?") ? "&" : "?") + "room=" + encodeURIComponent(room));
+    // Connect straight away, even before the visitor has chosen a circle: on
+    // a free tier the relay may be asleep, and waking it now is time not
+    // spent staring at the join dialog.
+    ws = new WebSocket(url);
 
-    ws.onopen = () => { backoff = 500; status("online"); if (nick) send("join", { nick, voice }); };
+    ws.onopen = () => { backoff = 500; status("online"); if (nick) announce(); };
 
     ws.onmessage = (e) => {
       let m;
@@ -410,8 +479,15 @@ function SocketTransport(url, room) {
       switch (m.t) {
         case "welcome":  myId = m.id; break;
         case "signal":   bus.emit("signal", { from: m.from, data: m.data }); break;
-        case "presence": bus.emit("presence",
-                           m.users.map((u) => ({ ...u, self: u.id === myId }))); break;
+        case "denied":   bus.emit("denied", { reason: m.reason }); break;
+        case "presence":
+          bus.emit("presence", m.users.map((u) => ({ ...u, self: u.id === myId })));
+          // Membership is confirmed the first time we appear in the roster.
+          if (!admitted && m.users.some((u) => u.id === myId)) {
+            admitted = true;
+            bus.emit("joined", {});
+          }
+          break;
         case "message":  bus.emit("message", m); break;
         case "voice":    bus.emit("voice", m); break;
       }
@@ -438,7 +514,13 @@ function SocketTransport(url, room) {
     on: bus.on,
     users: () => [],
     id: () => myId,
-    join(n)      { nick = n; send("join", { nick: n, voice }); },
+    join(n, opts) {
+      nick = n;
+      room = (opts && opts.room) || "main";
+      keyHash = (opts && opts.keyHash) || null;
+      admitted = false;
+      announce();
+    },
     say(text)    { const b = (text || "").trim(); if (b) send("say", { text: b }); },
     setVoice(on) { voice = on; send("voice", { on }); },
     signal(to, data) { send("signal", { to, data }); }
@@ -462,6 +544,7 @@ function LocalTransport() {
 
     join(nick) {
       users.push({ id: "me", name: nick, self: true, voice: false });
+      bus.emit("joined", {});
       bus.emit("presence", snapshot());
       bus.emit("message", { id: "s" + (++seq), userId: "me", system: true,
                             text: `${nick} joined the circle` });
@@ -479,8 +562,8 @@ function LocalTransport() {
 }
 
 function createTransport() {
-  if (ROOM_SERVER) return SocketTransport(ROOM_SERVER, ROOM_ID);
-  if ("BroadcastChannel" in window) return ChannelTransport(ROOM_ID);
+  if (ROOM_SERVER) return SocketTransport(ROOM_SERVER);
+  if ("BroadcastChannel" in window) return ChannelTransport();
   return LocalTransport();
 }
 
@@ -533,6 +616,7 @@ const Audio_ = {
     this.beds.fire     = bed(0.55);
     this.beds.wind     = bed(0.30);
     this.beds.crickets = bed(0.22);
+    this.beds.waves    = bed(0.34);
 
     // --- fire: a low roar bed; discrete crackles are scheduled per frame
     const roar = ctx.createBufferSource();
@@ -558,7 +642,16 @@ const Audio_ = {
     wind.connect(wLP).connect(wGain).connect(this.beds.wind.gain);
     wind.start();
 
+    // --- ocean: a quiet standing sea, with swells scheduled over the top
+    const sea = ctx.createBufferSource();
+    sea.buffer = this.noiseBuffer(ctx, 6, true); sea.loop = true;
+    const seaLP = ctx.createBiquadFilter(); seaLP.type = "lowpass"; seaLP.frequency.value = 420;
+    const seaGain = ctx.createGain(); seaGain.gain.value = 0.22;
+    sea.connect(seaLP).connect(seaGain).connect(this.beds.waves.gain);
+    sea.start();
+
     this.scheduleCrickets();
+    this.scheduleWave();
     if (FIRE_BED_URL) this.loadFireBed(FIRE_BED_URL);
   },
 
@@ -686,6 +779,58 @@ const Audio_ = {
     setTimeout(() => this.scheduleCrickets(), rand(900, 2600));
   },
 
+  /* One wave: a low swell that rises slowly and falls away, with a brighter
+     hiss of foam arriving just after the crest. Waves are scheduled to
+     overlap slightly and vary in length, because evenly spaced swells read
+     as a loop almost immediately. */
+  wave() {
+    const ctx = this.ctx;
+    if (!ctx || !this.beds.waves.on) return;
+    const t = ctx.currentTime;
+    const rise = rand(1.6, 3.2);
+    const fall = rand(2.6, 4.8);
+
+    const swell = ctx.createBufferSource();
+    swell.buffer = this._surf || (this._surf = this.noiseBuffer(ctx, 8, true));
+    swell.loop = true;
+    swell.playbackRate.value = rand(0.8, 1.25);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.setValueAtTime(300, t);
+    lp.frequency.linearRampToValueAtTime(rand(900, 1600), t + rise);   // opens as it breaks
+    lp.frequency.linearRampToValueAtTime(280, t + rise + fall);
+    const g = ctx.createGain();
+    const peak = rand(0.30, 0.72);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + rise);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + rise + fall);
+    swell.connect(lp).connect(g).connect(this.beds.waves.gain);
+    swell.start(t, rand(0, 4));
+    swell.stop(t + rise + fall + 0.2);
+
+    // foam, arriving just behind the crest
+    const foam = ctx.createBufferSource();
+    foam.buffer = this._pop || (this._pop = this.noiseBuffer(ctx, 0.25, false));
+    foam.loop = true;
+    const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = rand(1800, 3200);
+    const fg = ctx.createGain();
+    const fStart = t + rise * 0.8;
+    fg.gain.setValueAtTime(0.0001, fStart);
+    fg.gain.linearRampToValueAtTime(peak * rand(0.18, 0.34), fStart + 0.35);
+    fg.gain.exponentialRampToValueAtTime(0.0001, fStart + fall * 0.9);
+    foam.connect(hp).connect(fg).connect(this.beds.waves.gain);
+    foam.start(fStart);
+    foam.stop(fStart + fall + 0.2);
+
+    return rise + fall;
+  },
+
+  scheduleWave() {
+    const len = this.wave() || 6;
+    // overlap the next swell into the tail of this one
+    setTimeout(() => this.scheduleWave(), (len * rand(0.55, 0.8)) * 1000);
+  },
+
   /* Fire loudness + tone follow the crowd size. A small fire is quiet and
      dull; a big one is louder and brighter, because more of the crackle
      energy sits up in the treble. */
@@ -735,16 +880,29 @@ const Voice = {
 
   supported() { return typeof net.signal === "function" && !!window.RTCPeerConnection; },
 
+  talking: false,
+
   async enable() {
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
     this.on = true;
+    this.transmit(false);        // push to talk: joined, but not open-mic
     this.sync();
+  },
+
+  /* Gate the outgoing track rather than tearing down the connection. A
+     disabled track keeps sending silence, so the peer connection stays warm
+     and the first syllable after you press is not clipped. */
+  transmit(on) {
+    this.talking = !!on && this.on;
+    if (!this.stream) return;
+    for (const t of this.stream.getAudioTracks()) t.enabled = this.talking;
   },
 
   disable() {
     this.on = false;
+    this.talking = false;
     if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
     this.stream = null;
     for (const id of [...this.peers.keys()]) this.hangUp(id);
@@ -1301,7 +1459,7 @@ function positionSays(now) {
 /* A relay on a free tier sleeps, and waking it takes the better part of a
    minute. Say so, rather than showing an empty clearing and looking broken. */
 let linkState = ROOM_SERVER ? "connecting" : "online";
-let seated = false;                    // have we actually joined the circle?
+let seated = false;                    // admitted to a circle yet?
 
 function renderPresence() {
   const el = $("#presence");
@@ -1338,15 +1496,89 @@ const localNote = (text) =>
   addSay({ id: "local" + Date.now(), userId: null, system: true, text });
 
 /* --- join gate --- */
-$("#joinForm").addEventListener("submit", (e) => {
+const gateError = (msg) => {
+  const el = $("#gateError");
+  el.textContent = msg || "";
+  el.classList.toggle("show", !!msg);
+};
+
+$("#privToggle").addEventListener("click", () => {
+  const key = $("#roomKey");
+  const opening = key.hidden;
+  key.hidden = !opening;
+  $("#joinBtn").textContent = opening ? "Open the circle" : "Join the circle";
+  $("#privToggle").textContent = opening
+    ? "or join the open fire"
+    : "or open a private circle";
+  gateError("");
+  if (opening) key.focus();
+});
+
+function dismissGate() {
+  $("#gate").classList.add("gone");
+  // Deliberately does NOT focus the chat box. Space is push-to-talk, and a
+  // focused text field swallows it — the mic has to win by default. Press /
+  // to start typing.
+  setTimeout(() => { $("#gate").style.display = "none"; }, 900);
+}
+
+let privateCircle = false;
+
+net.on("joined", () => {
+  seated = true;
+  renderPresence();
+  dismissGate();
+
+  /* A mistyped key does not fail — it derives a different circle, which is
+     indistinguishable from an empty one. That is deliberate: it denies an
+     attacker any oracle for guessing keys. But it is baffling if you simply
+     typed the key wrong, so say something when a private circle stays empty. */
+  if (!privateCircle) return;
+  setTimeout(() => {
+    if (users.length <= 1) {
+      localNote("nobody else here yet — if you expected company, check the key matches exactly");
+    }
+  }, 6000);
+});
+
+net.on("denied", () => {
+  // Never admitted, so nothing to leave. Put the visitor back at the door.
+  seated = false;
+  $("#joinBtn").disabled = false;
+  $("#joinBtn").textContent = "Open the circle";
+  gateError("that key does not match this circle");
+});
+
+$("#joinForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const nick = ($("#nick").value || "").trim().slice(0, 18) || "wanderer";
+  const key  = ($("#roomKey").hidden ? "" : ($("#roomKey").value || "").trim());
+  const btn  = $("#joinBtn");
+  gateError("");
+
+  let circle = { room: ROOM_ID, keyHash: null };
+  if (key) {
+    if (!(window.crypto && crypto.subtle)) {
+      gateError("private circles need a secure connection (https)");
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "opening…";
+    try {
+      circle = await deriveCircle(key);
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "Open the circle";
+      gateError("could not open that circle");
+      return;
+    }
+  }
+
+  privateCircle = !!key;
   Audio_.start();                // must happen inside a user gesture
   Audio_.bedOn("fire", true);
-  seated = true;
-  net.join(nick);
-  $("#gate").classList.add("gone");
-  setTimeout(() => { $("#gate").style.display = "none"; $("#say").focus(); }, 900);
+  net.join(nick, circle);
+  btn.disabled = false;
 });
 
 /* --- composer --- */
@@ -1368,6 +1600,13 @@ function toggle(btn, fn) {
 toggle($("#tFire"),     (on) => Audio_.bedOn("fire", on));
 toggle($("#tWind"),     (on) => Audio_.bedOn("wind", on));
 toggle($("#tCrickets"), (on) => Audio_.bedOn("crickets", on));
+toggle($("#tWaves"),    (on) => Audio_.bedOn("waves", on));
+
+/* Is the caret in a text field? Space belongs to that field if so. */
+function typing() {
+  const el = document.activeElement;
+  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+}
 
 /* --- voice --- */
 let micAnalyser = null, micData = null;
@@ -1376,6 +1615,8 @@ toggle($("#tVoice"), async (on) => {
 
   if (!on) {
     Voice.disable();
+    setTalking(false);
+    $("#ptt").hidden = true;
     micAnalyser = micData = null;
     micLevel = 0;
     label.textContent = "Join Voice";
@@ -1401,6 +1642,8 @@ toggle($("#tVoice"), async (on) => {
     Audio_.ctx.createMediaStreamSource(Voice.stream).connect(micAnalyser);
 
     label.textContent = "Voice on";
+    $("#ptt").hidden = false;
+    if (typing()) document.activeElement.blur();   // hand Space back to the mic
     net.setVoice(true);                 // tells everyone else to dial us
     pollMic();
   } catch (err) {
@@ -1420,6 +1663,44 @@ function pollMic() {
   requestAnimationFrame(pollMic);
 }
 
+/* --- push to talk ---------------------------------------------------
+   The mic is gated, not the connection: holding the key enables the
+   outgoing track and releasing it disables it again. Everything that can
+   leave it stuck open — losing focus, the page being hidden, a key press
+   swallowed by a text field — has to be handled, because a microphone
+   nobody realises is live is the worst possible failure here. */
+function setTalking(on) {
+  if (on && !Voice.on) return;
+  if (Voice.talking === !!on) return;
+  Voice.transmit(on);
+  $("#ptt").classList.toggle("talking", Voice.talking);
+  if (!Voice.talking) micLevel = 0;
+}
+
+addEventListener("keydown", (e) => {
+  if (e.code !== "Space" || e.repeat || typing()) return;
+  e.preventDefault();               // Space would otherwise scroll the page
+  wake();
+  setTalking(true);
+});
+addEventListener("keyup", (e) => {
+  if (e.code !== "Space") return;
+  setTalking(false);
+});
+
+// Any loss of focus or visibility closes the mic rather than leaving it live.
+addEventListener("blur", () => setTalking(false));
+document.addEventListener("visibilitychange", () => { if (document.hidden) setTalking(false); });
+
+const pttBtn = $("#ptt");
+pttBtn.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  pttBtn.setPointerCapture(e.pointerId);      // keep the release even if we slide off
+  setTalking(true);
+});
+["pointerup", "pointercancel", "lostpointercapture"].forEach((evt) =>
+  pttBtn.addEventListener(evt, () => setTalking(false)));
+
 /* --- auto-hiding chrome --- */
 let idleTimer = 0;
 const IDLE_MS = 3000;
@@ -1429,6 +1710,7 @@ function wake() {
   idleTimer = setTimeout(() => {
     if (document.activeElement === $("#say") && $("#say").value) return;
     if (document.querySelector("#dock:hover, #composer:hover")) return;
+    if (Voice.talking) return;                  // never hide a live microphone
     document.body.classList.add("idle");
   }, IDLE_MS);
 }

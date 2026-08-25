@@ -12,7 +12,7 @@ import { createServer } from "http";
 import { WebSocketServer } from "ws";
 
 const PORT = process.env.PORT || 8080;
-const rooms = new Map();          // roomId -> Map(userId -> { id, name, voice, ws })
+const rooms = new Map();          // roomId -> { keyHash, users: Map(userId -> user) }
 
 let seq = 0;
 const uid = () => (++seq).toString(36) + Date.now().toString(36);
@@ -27,20 +27,22 @@ const wss = new WebSocketServer({ server: http });
 
 const broadcast = (room, payload) => {
   const data = JSON.stringify(payload);
-  for (const u of room.values()) if (u.ws.readyState === 1) u.ws.send(data);
+  for (const u of room.users.values()) if (u.ws.readyState === 1) u.ws.send(data);
 };
 const presence = (room) => broadcast(room, {
   t: "presence",
-  users: [...room.values()].map(({ id, name, voice }) => ({ id, name, voice }))
+  users: [...room.users.values()].map(({ id, name, voice }) => ({ id, name, voice }))
 });
 const notice = (room, userId, text) =>
   broadcast(room, { t: "message", id: "s" + uid(), userId, system: true, text });
 
-wss.on("connection", (ws, req) => {
-  const roomId = new URL(req.url, "http://relay").searchParams.get("room") || "main";
-  if (!rooms.has(roomId)) rooms.set(roomId, new Map());
-  const room = rooms.get(roomId);
+wss.on("connection", (ws) => {
+  // The room is chosen in the join message, not the connection URL, so one
+  // warm socket can serve any circle — and the relay can be woken before the
+  // visitor has decided which fire they are walking up to.
+  let roomId = null;
 
+  let room = null;                  // set once the client presents a valid key
   const me = { id: uid(), name: null, voice: false, ws };
   ws.isAlive = true;
   ws.on("pong", () => { ws.isAlive = true; });
@@ -52,21 +54,39 @@ wss.on("connection", (ws, req) => {
 
     if (m.t === "join") {
       const name = String(m.nick || "").slice(0, 18).trim() || "wanderer";
-      const rejoining = room.has(me.id);       // a reconnect, not a new arrival
+      const wanted = String(m.room || "main").slice(0, 80);
+      if (roomId && roomId !== wanted) leave();   // moving between circles
+      roomId = wanted;
+      // The key never reaches us: the page sends only a SHA-256 digest, and
+      // we compare digests. Whoever opens a circle sets its key; everyone
+      // after must present the same one.
+      const keyHash = m.keyHash ? String(m.keyHash).slice(0, 64) : null;
+
+      if (!rooms.has(roomId)) rooms.set(roomId, { keyHash, users: new Map() });
+      room = rooms.get(roomId);
+
+      if (room.keyHash !== keyHash) {
+        ws.send(JSON.stringify({ t: "denied", reason: "key" }));
+        return;                                // not admitted, not in the roster
+      }
+
+      const rejoining = room.users.has(me.id); // a reconnect, not a new arrival
       me.name = name;
       me.voice = !!m.voice;
-      room.set(me.id, me);
+      room.users.set(me.id, me);
       presence(room);
       if (!rejoining) notice(room, me.id, `${name} joined the circle`);
       return;
     }
+
+    if (!room) return;                          // nothing before a successful join
 
     if (!me.name) return;                      // must join before saying anything
 
     if (m.t === "signal") {
       // WebRTC signalling: opaque to us, routed to exactly one recipient.
       // The relay never sees or carries the audio itself.
-      const target = room.get(m.to);
+      const target = room.users.get(m.to);
       if (target && target.ws.readyState === 1) {
         target.ws.send(JSON.stringify({ t: "signal", from: me.id, data: m.data }));
       }
@@ -90,10 +110,14 @@ wss.on("connection", (ws, req) => {
   });
 
   function leave() {
-    if (!room.delete(me.id)) return;            // already gone; do not double-announce
-    presence(room);
-    if (me.name) notice(room, me.id, `${me.name} slipped into the dark`);
-    if (!room.size) rooms.delete(roomId);
+    if (!room) return;
+    const left = room.users.delete(me.id);
+    if (left) {
+      presence(room);
+      if (me.name) notice(room, me.id, `${me.name} slipped into the dark`);
+      if (!room.users.size) rooms.delete(roomId);  // an empty circle forgets its key
+    }
+    room = null;                                   // no stale room after leaving
   }
 
   ws.on("close", leave);
