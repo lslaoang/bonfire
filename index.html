@@ -182,7 +182,6 @@
     #dock { gap: 2px; padding: 6px; bottom: 16px; }
     .btn { padding: 0 10px; font-size: 11.5px; }
     .btn .label { display: none; }
-    .btn.keep-label .label { display: inline; }
     #composer { bottom: 68px; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -219,9 +218,6 @@
   <button class="btn" id="tVoice" aria-pressed="false">
     <svg class="ico" viewBox="0 0 16 16" fill="none" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><rect x="6" y="1.4" width="4" height="7.6" rx="2"/><path d="M3.4 7.6a4.6 4.6 0 0 0 9.2 0"/><path d="M8 12.2v2.4"/></svg>
     <span class="label">Join Voice</span></button>
-  <span class="sep"></span>
-  <button class="btn keep-label" id="addUser">+ Add user</button>
-  <button class="btn keep-label" id="delUser">− Remove</button>
 </nav>
 
 <div id="gate">
@@ -246,14 +242,13 @@ const TAU = Math.PI * 2;
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 const lerp  = (a, b, t) => a + (b - a) * t;
 const rand  = (a, b) => a + Math.random() * (b - a);
-const pick  = (arr) => arr[(Math.random() * arr.length) | 0];
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /* ==================================================================
    1. TRANSPORT LAYER
    ------------------------------------------------------------------
    Everything the UI knows about "other people" arrives through this
-   interface. Swap MockTransport for SocketTransport (below, commented)
+   interface. Swap LocalTransport for SocketTransport (below, commented)
    and the rest of the app is unchanged — that is the whole point.
 
      transport.join(nick)      -> announce yourself
@@ -269,36 +264,19 @@ function Emitter() {
   };
 }
 
-const BOT_NAMES = ["mira","juno","tobias","wren","sable","kofi","noor","dash","opal","reyes","ivy","bram","suri","cass","lyle","nyx"];
-const BOT_LINES = [
-  "this is exactly what i needed tonight",
-  "someone throw another log on",
-  "it's so quiet out here",
-  "i can smell the woodsmoke from here",
-  "the sparks look like they're going somewhere",
-  "brb making tea",
-  "hey :)",
-  "i could stay here for hours",
-  "did anyone bring marshmallows",
-  "the wind picked up a little",
-  "stars are out",
-  "just listening"
-];
+/* No backend is wired up yet, so the circle holds exactly one real person:
+   you. Nobody else appears until a server is answering on the other end.
 
-function MockTransport() {
+   The `develop` branch carries a simulated crowd for exercising how the fire
+   scales with occupancy. It is deliberately absent here — a public demo that
+   manufactures people is a demo that lies about who is present. */
+function LocalTransport() {
   const bus   = Emitter();
   const users = [];
-  let seq = 0, chatter = null;
+  let seq = 0;
 
   const snapshot = () => users.map((u) => ({ ...u }));
   const push = () => bus.emit("presence", snapshot());
-
-  function add(user) {
-    users.push(user);
-    push();
-    bus.emit("message", { id: "s" + (++seq), userId: user.id, system: true, text: `${user.name} joined the circle` });
-    return user;
-  }
 
   return {
     on: bus.on,
@@ -308,17 +286,12 @@ function MockTransport() {
     join(nick) {
       const me = { id: "me", name: nick, self: true, voice: false, joinedAt: Date.now() };
       this.self = me;
-      add(me);
-      // A couple of people are already here, so the fire isn't lonely.
-      setTimeout(() => this.addBot(), 900);
-      setTimeout(() => this.addBot(), 2600);
-      // Idle ambient chatter from the mock room.
-      chatter = setInterval(() => {
-        const bots = users.filter((u) => !u.self);
-        if (!bots.length || Math.random() > 0.45) return;
-        const b = pick(bots);
-        bus.emit("message", { id: "m" + (++seq), userId: b.id, text: pick(BOT_LINES) });
-      }, 7000);
+      users.push(me);
+      push();
+      bus.emit("message", {
+        id: "s" + (++seq), userId: me.id, system: true,
+        text: `${me.name} joined the circle`
+      });
     },
 
     say(text) {
@@ -332,22 +305,6 @@ function MockTransport() {
       if (u) u.voice = on;
       push();
       bus.emit("voice", { userId: "me", on });
-    },
-
-    /* --- mock-only controls, for testing fire scaling --- */
-    addBot() {
-      const taken = new Set(users.map((u) => u.name));
-      const base  = BOT_NAMES.find((n) => !taken.has(n)) || "guest";
-      const name  = taken.has(base) ? base + (users.length) : base;
-      const u = add({ id: "u" + (++seq), name, self: false, voice: Math.random() < 0.5, joinedAt: Date.now() });
-      setTimeout(() => bus.emit("message", { id: "m" + (++seq), userId: u.id, text: pick(["hey everyone","made it","hi hi","evening","found you"]) }), rand(1200, 2600));
-    },
-    removeBot() {
-      const i = users.map((u) => u.self).lastIndexOf(false);
-      if (i < 0) return;
-      const [gone] = users.splice(i, 1);
-      push();
-      bus.emit("message", { id: "s" + (++seq), userId: gone.id, system: true, text: `${gone.name} slipped into the dark` });
     }
   };
 }
@@ -367,7 +324,7 @@ function SocketTransport(url) {
 }
 --------------------------------------------------------------------- */
 
-const net = MockTransport();
+const net = LocalTransport();
 
 /* ==================================================================
    2. AUDIO — everything is synthesised, no asset files
@@ -1119,10 +1076,6 @@ function pollMic() {
   micLevel = clamp(Math.sqrt(sum / micData.length) * 6, 0, 1);
   requestAnimationFrame(pollMic);
 }
-
-/* --- mock crowd controls --- */
-$("#addUser").addEventListener("click", () => net.addBot());
-$("#delUser").addEventListener("click", () => net.removeBot());
 
 /* --- auto-hiding chrome --- */
 let idleTimer = 0;

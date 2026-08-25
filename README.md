@@ -6,7 +6,9 @@ it, and shrinks back down when they leave.
 
 **Live demo → https://lslaoang.github.io/bonfire/**
 
-Click *+ Add user* to watch the fire respond.
+There is no backend yet, so you will be the only one at the fire — a small,
+quiet one. That is the honest state of the prototype. To see the fire scale
+with occupancy, use the `develop` branch, which carries a simulated crowd.
 
 ---
 
@@ -33,6 +35,8 @@ To add a feature, hang it off `I`. Don't add another counter.
 - **Dynamic fire** — canvas particle system; spawn rates, scale, glow radius
   and audio all scale with occupancy.
 - **No signup** — type a nickname, sit down.
+- **Real occupancy only** — the roster reflects who is actually connected;
+  nothing is padded out with fake participants.
 - **Ambient beds** — crackling fire, wind and crickets, independently
   toggleable.
 - **Fading chat** — messages drift up, blur and dissolve like smoke. Nothing
@@ -41,6 +45,16 @@ To add a feature, hang it off `I`. Don't add another counter.
 - **Voice toggle** — real `getUserMedia`, drives a ring around your silhouette
   from an analyser node. Mic audio is never routed back to output.
 - **Auto-hiding UI** — chrome fades after 3s idle, and won't hide mid-sentence.
+
+## Branches
+
+| Branch | What it is |
+|---|---|
+| `main` | The shipped build. Real occupants only, and deployed to Pages. |
+| `develop` | `main` plus a simulated crowd: *+ Add user* / *− Remove* controls, auto-joining bots and canned chatter, for exercising how the fire scales. |
+
+The crowd simulator lives only on `develop` on purpose. A public demo that
+manufactures people is a demo that misrepresents its own occupancy.
 
 ## Running it
 
@@ -65,9 +79,10 @@ transport.setVoice(bool)   // announce mic state
 transport.on(evt, fn)      // 'presence' | 'message' | 'voice'
 ```
 
-`MockTransport` implements it with fake users. A `SocketTransport` sketch sits
-directly beside it in `index.html`. Replace `const net = MockTransport()` and
-nothing else in the app changes.
+`LocalTransport` implements it for a single local occupant — you, and nobody
+else, because nothing is answering on the other end yet. A `SocketTransport`
+sketch sits directly beside it in `index.html`. Replace
+`const net = LocalTransport()` and nothing else in the app changes.
 
 For a real deployment:
 
