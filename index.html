@@ -279,7 +279,7 @@ const ROOM_ID = new URLSearchParams(location.search).get("room") || "main";
 /* Point this at a relay (see server/) to bind people across machines.
    Left empty, the circle still binds every tab and window of THIS browser
    — real sessions and real messages, just confined to one device. */
-const ROOM_SERVER = "";
+const ROOM_SERVER = "wss://bonfire-relay.onrender.com";
 
 const BEAT_MS  = 2000;   // presence heartbeat
 const STALE_MS = 6500;   // drop a peer we have not heard from in this long
@@ -391,15 +391,18 @@ function ChannelTransport(room) {
 ------------------------------------------------------------------ */
 function SocketTransport(url, room) {
   const bus = Emitter();
-  let ws = null, myId = null, nick = null, voice = false, backoff = 500;
+  let ws = null, myId = null, nick = null, voice = false, backoff = 500, leaving = false;
 
   const send = (t, extra) =>
     ws && ws.readyState === 1 && ws.send(JSON.stringify({ t, ...extra }));
 
+  const status = (state) => bus.emit("status", { state });
+
   (function connect() {
+    status("connecting");
     ws = new WebSocket(url + (url.includes("?") ? "&" : "?") + "room=" + encodeURIComponent(room));
 
-    ws.onopen = () => { backoff = 500; if (nick) send("join", { nick, voice }); };
+    ws.onopen = () => { backoff = 500; status("online"); if (nick) send("join", { nick, voice }); };
 
     ws.onmessage = (e) => {
       let m;
@@ -414,8 +417,21 @@ function SocketTransport(url, room) {
     };
 
     ws.onerror = () => ws.close();
-    ws.onclose = () => setTimeout(connect, (backoff = Math.min(backoff * 2, 8000)));
+    ws.onclose = () => {
+      if (leaving) return;                       // page is going away; do not reconnect
+      status("offline");
+      setTimeout(connect, (backoff = Math.min(backoff * 2, 8000)));
+    };
   })();
+
+  /* Say goodbye explicitly. A proxy in front of the relay may sit on the
+     close frame for tens of seconds, and until it lands we are still seated
+     at the fire from everyone else's point of view. */
+  addEventListener("pagehide", () => {
+    leaving = true;
+    send("bye", {});
+    if (ws) try { ws.close(); } catch (err) { /* already gone */ }
+  });
 
   return {
     on: bus.on,
@@ -1137,6 +1153,20 @@ function positionSays(now) {
 /* ==================================================================
    5. UI WIRING
 ================================================================== */
+/* A relay on a free tier sleeps, and waking it takes the better part of a
+   minute. Say so, rather than showing an empty clearing and looking broken. */
+let linkState = ROOM_SERVER ? "connecting" : "online";
+
+function renderPresence() {
+  const n = users.length;
+  const el = $("#presence");
+  if (linkState === "connecting" && !n) { el.textContent = "finding the others…"; return; }
+  if (linkState === "offline")          { el.textContent = "reconnecting…"; return; }
+  el.textContent = n === 1 ? "1 person at the fire" : `${n} people at the fire`;
+}
+
+net.on("status", (s) => { linkState = s.state; renderPresence(); });
+
 net.on("presence", (list) => {
   const prev = new Map(users.map((u) => [u.id, u.seat]));
   users = list.map((u) => ({ ...u, seat: prev.get(u.id) }));
@@ -1144,8 +1174,7 @@ net.on("presence", (list) => {
   layoutSeats();
   targetIntensity = intensityFor(users.length);
   Audio_.tune(targetIntensity);
-  const n = users.length;
-  $("#presence").textContent = n === 1 ? "1 person at the fire" : `${n} people at the fire`;
+  renderPresence();
 });
 net.on("message", addSay);
 

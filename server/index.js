@@ -60,7 +60,13 @@ wss.on("connection", (ws, req) => {
 
     if (!me.name) return;                      // must join before saying anything
 
-    if (m.t === "say") {
+    if (m.t === "bye") {
+      // A closing page tells us directly. Proxies do not always forward a
+      // client's close frame promptly, so without this the departed sit at
+      // the fire until the ping sweep notices they are gone.
+      leave();
+      try { ws.close(); } catch {}
+    } else if (m.t === "say") {
       const text = String(m.text || "").slice(0, 180).trim();
       if (text) broadcast(room, { t: "message", id: "m" + uid(), userId: me.id, text });
     } else if (m.t === "voice") {
@@ -70,22 +76,26 @@ wss.on("connection", (ws, req) => {
     }
   });
 
-  ws.on("close", () => {
-    if (!room.delete(me.id)) return;
+  function leave() {
+    if (!room.delete(me.id)) return;            // already gone; do not double-announce
     presence(room);
     if (me.name) notice(room, me.id, `${me.name} slipped into the dark`);
     if (!room.size) rooms.delete(roomId);
-  });
+  }
+
+  ws.on("close", leave);
+  ws.on("error", leave);
 });
 
 /* Most hosts and proxies drop an idle WebSocket after ~60s. Ping under that,
    and terminate anything that stops ponging so the roster stays honest. */
+const SWEEP_MS = 10000;
 setInterval(() => {
   for (const ws of wss.clients) {
-    if (!ws.isAlive) { ws.terminate(); continue; }
+    if (!ws.isAlive) { ws.terminate(); continue; }   // fires the close handler
     ws.isAlive = false;
     ws.ping();
   }
-}, 30000);
+}, SWEEP_MS);
 
 http.listen(PORT, () => console.log(`bonfire relay listening on :${PORT}`));
