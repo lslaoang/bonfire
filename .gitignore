@@ -12,3 +12,6 @@
 
 # Relay dependencies
 node_modules/
+
+# JetBrains
+.idea/
