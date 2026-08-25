@@ -6,9 +6,10 @@ it, and shrinks back down when they leave.
 
 **Live demo → https://lslaoang.github.io/bonfire/**
 
-There is no backend yet, so you will be the only one at the fire — a small,
-quiet one. That is the honest state of the prototype. To see the fire scale
-with occupancy, use the `develop` branch, which carries a simulated crowd.
+**Open it in two tabs and you will see two people at the fire**, chatting with
+each other and making the flames grow. That is real shared presence, not a
+simulation — it is just confined to one browser until a relay is deployed
+(see *Connecting people* below).
 
 ---
 
@@ -37,6 +38,8 @@ To add a feature, hang it off `I`. Don't add another counter.
 - **No signup** — type a nickname, sit down.
 - **Real occupancy only** — the roster reflects who is actually connected;
   nothing is padded out with fake participants.
+- **Shared presence** — tabs bind to each other out of the box; add the relay
+  and it binds across machines.
 - **Ambient beds** — crackling fire, wind and crickets, independently
   toggleable.
 - **Fading chat** — messages drift up, blur and dissolve like smoke. Nothing
@@ -46,12 +49,44 @@ To add a feature, hang it off `I`. Don't add another counter.
   from an analyser node. Mic audio is never routed back to output.
 - **Auto-hiding UI** — chrome fades after 3s idle, and won't hide mid-sentence.
 
+## Connecting people
+
+By default the circle binds **every tab and window of one browser**. Two tabs,
+two people, real messages between them. Nothing to install.
+
+To bind people across machines, run the relay in `server/`:
+
+```bash
+cd server && npm install && npm start     # listens on :8080
+```
+
+Then point the client at it — in `index.html`:
+
+```js
+const ROOM_SERVER = "ws://localhost:8080";     // wss:// once deployed
+```
+
+The relay is ~90 lines of Node and `ws`. It owns the roster and broadcasts it
+whole, persists nothing, and pings every 30s so proxies do not silently drop
+idle connections. A restart empties every circle, which is roughly what
+happens when everyone walks away from a real fire.
+
+`render.yaml` in the repo root deploys it to Render's free tier as-is. Any
+host that supports WebSockets works — the relay is plain Node with one
+dependency. Note that a page served over `https://` can only connect to a
+`wss://` relay, not `ws://`.
+
+### Rooms
+
+`?room=porch` is a different fire from the default. Rooms are created on
+demand and disappear when the last person leaves.
+
 ## Branches
 
 | Branch | What it is |
 |---|---|
 | `main` | The shipped build. Real occupants only, and deployed to Pages. |
-| `develop` | `main` plus a simulated crowd: *+ Add user* / *− Remove* controls, auto-joining bots and canned chatter, for exercising how the fire scales. |
+| `develop` | `main` plus a simulated crowd: *+ Add user* / *− Remove* controls, for exercising how the fire scales without opening a dozen tabs. |
 
 The crowd simulator lives only on `develop` on purpose. A public demo that
 manufactures people is a demo that misrepresents its own occupancy.
@@ -79,10 +114,19 @@ transport.setVoice(bool)   // announce mic state
 transport.on(evt, fn)      // 'presence' | 'message' | 'voice'
 ```
 
-`LocalTransport` implements it for a single local occupant — you, and nobody
-else, because nothing is answering on the other end yet. A `SocketTransport`
-sketch sits directly beside it in `index.html`. Replace
-`const net = LocalTransport()` and nothing else in the app changes.
+Three implementations ship, and `createTransport()` picks one at startup.
+Nothing below the transport section knows or cares which is in use.
+
+| Implementation | Binds together | Needs |
+|---|---|---|
+| `SocketTransport` | everyone connected to the relay | `ROOM_SERVER` set, relay deployed |
+| `ChannelTransport` | every tab and window of one browser | nothing — this is the default |
+| `LocalTransport` | you, alone | fallback for no `BroadcastChannel` |
+
+`ChannelTransport` has no server and therefore no authority, so presence is
+gossiped: announce yourself on join, answer anyone else who announces, and
+heartbeat continuously so a tab that crashes without saying goodbye ages out
+of everyone's roster instead of haunting it.
 
 For a real deployment:
 

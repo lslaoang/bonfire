@@ -248,13 +248,18 @@ const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
    1. TRANSPORT LAYER
    ------------------------------------------------------------------
    Everything the UI knows about "other people" arrives through this
-   interface. Swap LocalTransport for SocketTransport (below, commented)
-   and the rest of the app is unchanged — that is the whole point.
+   interface, and nothing below this section knows which one is in use.
 
      transport.join(nick)      -> announce yourself
      transport.say(text)       -> broadcast a chat line
      transport.setVoice(bool)  -> announce mic state
      transport.on(evt, fn)     -> 'presence' | 'message' | 'voice'
+
+   Three implementations, picked at startup by createTransport():
+
+     SocketTransport   everyone connected to the relay in server/
+     ChannelTransport  every tab and window of THIS browser
+     LocalTransport    you alone (no BroadcastChannel support)
 ================================================================== */
 function Emitter() {
   const map = new Map();
@@ -264,67 +269,203 @@ function Emitter() {
   };
 }
 
-/* No backend is wired up yet, so the circle holds exactly one real person:
-   you. Nobody else appears until a server is answering on the other end.
+const uid = () => (crypto.randomUUID ? crypto.randomUUID()
+  : Math.random().toString(36).slice(2) + Date.now().toString(36));
 
-   The `develop` branch carries a simulated crowd for exercising how the fire
-   scales with occupancy. It is deliberately absent here — a public demo that
-   manufactures people is a demo that lies about who is present. */
+/* Each room is its own fire: ?room=porch is a different circle from the
+   default. Rooms are ephemeral either way — nothing is persisted. */
+const ROOM_ID = new URLSearchParams(location.search).get("room") || "main";
+
+/* Point this at a relay (see server/) to bind people across machines.
+   Left empty, the circle still binds every tab and window of THIS browser
+   — real sessions and real messages, just confined to one device. */
+const ROOM_SERVER = "";
+
+const BEAT_MS  = 2000;   // presence heartbeat
+const STALE_MS = 6500;   // drop a peer we have not heard from in this long
+
+/* ------------------------------------------------------------------
+   ChannelTransport — every tab and window of this browser, one fire.
+
+   There is no server here and so no authority: presence is gossiped.
+   Announce yourself on join, answer anyone else who announces, and
+   heartbeat continuously, so a tab that crashes without saying goodbye
+   still ages out of everyone else's roster instead of haunting it.
+------------------------------------------------------------------ */
+function ChannelTransport(room) {
+  const bus   = Emitter();
+  const ch    = new BroadcastChannel("bonfire:" + room);
+  const me    = { id: uid(), name: "", voice: false };
+  const peers = new Map();                 // id -> { id, name, voice, seen }
+  let seq = 0, joined = false;
+
+  const pub  = () => ({ id: me.id, name: me.name, voice: me.voice });
+  const send = (t, extra) => ch.postMessage({ t, from: me.id, ...extra });
+
+  const roster = () => [
+    { id: me.id, name: me.name, self: true, voice: me.voice },
+    ...[...peers.values()].map((p) => ({ id: p.id, name: p.name, self: false, voice: p.voice }))
+  ];
+  const push = () => bus.emit("presence", roster());
+  const sys  = (userId, text) => bus.emit("message",
+    { id: "s" + (++seq) + me.id, userId, system: true, text });
+
+  function note(u) {
+    if (!u || u.id === me.id) return;
+    const known = peers.get(u.id);
+    peers.set(u.id, { id: u.id, name: u.name, voice: !!u.voice, seen: Date.now() });
+    if (!known) { push(); sys(u.id, `${u.name} joined the circle`); }
+    else if (known.name !== u.name || known.voice !== !!u.voice) push();
+  }
+
+  ch.onmessage = (e) => {
+    const m = e.data;
+    if (!joined || !m || m.from === me.id) return;
+    switch (m.t) {
+      case "hello": note(m.u); send("here", { u: pub() }); break;   // greet the newcomer back
+      case "here":
+      case "ping":  note(m.u); break;
+      case "bye": {
+        const p = peers.get(m.from);
+        if (!p) break;
+        peers.delete(m.from);
+        push();
+        sys(m.from, `${p.name} slipped into the dark`);
+        break;
+      }
+      case "say":
+        note(m.u);
+        bus.emit("message", { id: m.id, userId: m.u.id, text: m.text });
+        break;
+    }
+  };
+
+  // A closing tab announces itself; a crashing one is caught by the heartbeat.
+  addEventListener("pagehide", () => { if (joined) send("bye", {}); });
+
+  return {
+    on: bus.on,
+    users: roster,
+
+    join(nick) {
+      me.name = nick;
+      joined  = true;
+      push();
+      sys(me.id, `${nick} joined the circle`);
+      send("hello", { u: pub() });
+
+      setInterval(() => {
+        send("ping", { u: pub() });
+        const cutoff = Date.now() - STALE_MS;
+        const lost = [];
+        for (const [id, p] of peers) if (p.seen < cutoff) { peers.delete(id); lost.push(p); }
+        if (!lost.length) return;
+        push();                                   // roster first, then the notices
+        lost.forEach((p) => sys(p.id, `${p.name} slipped into the dark`));
+      }, BEAT_MS);
+    },
+
+    say(text) {
+      const body = (text || "").trim();
+      if (!joined || !body) return;
+      const id = "m" + (++seq) + me.id;
+      bus.emit("message", { id, userId: me.id, text: body });   // show mine immediately
+      send("say", { id, u: pub(), text: body });
+    },
+
+    setVoice(on) {
+      me.voice = on;
+      push();
+      send("ping", { u: pub() });
+      bus.emit("voice", { userId: me.id, on });
+    }
+  };
+}
+
+/* ------------------------------------------------------------------
+   SocketTransport — one fire across machines, via the relay in server/.
+
+   The server owns the roster; this client renders what it is told and
+   never decides who is present. Reconnects with backoff, and re-announces
+   itself on the way back up so a dropped connection self-heals.
+------------------------------------------------------------------ */
+function SocketTransport(url, room) {
+  const bus = Emitter();
+  let ws = null, myId = null, nick = null, voice = false, backoff = 500;
+
+  const send = (t, extra) =>
+    ws && ws.readyState === 1 && ws.send(JSON.stringify({ t, ...extra }));
+
+  (function connect() {
+    ws = new WebSocket(url + (url.includes("?") ? "&" : "?") + "room=" + encodeURIComponent(room));
+
+    ws.onopen = () => { backoff = 500; if (nick) send("join", { nick, voice }); };
+
+    ws.onmessage = (e) => {
+      let m;
+      try { m = JSON.parse(e.data); } catch { return; }
+      switch (m.t) {
+        case "welcome":  myId = m.id; break;
+        case "presence": bus.emit("presence",
+                           m.users.map((u) => ({ ...u, self: u.id === myId }))); break;
+        case "message":  bus.emit("message", m); break;
+        case "voice":    bus.emit("voice", m); break;
+      }
+    };
+
+    ws.onerror = () => ws.close();
+    ws.onclose = () => setTimeout(connect, (backoff = Math.min(backoff * 2, 8000)));
+  })();
+
+  return {
+    on: bus.on,
+    users: () => [],
+    join(n)      { nick = n; send("join", { nick: n, voice }); },
+    say(text)    { const b = (text || "").trim(); if (b) send("say", { text: b }); },
+    setVoice(on) { voice = on; send("voice", { on }); }
+  };
+}
+
+/* ------------------------------------------------------------------
+   LocalTransport — last resort: you, alone. Only reached on a browser
+   without BroadcastChannel and with no relay configured.
+------------------------------------------------------------------ */
 function LocalTransport() {
   const bus   = Emitter();
   const users = [];
   let seq = 0;
 
   const snapshot = () => users.map((u) => ({ ...u }));
-  const push = () => bus.emit("presence", snapshot());
 
   return {
     on: bus.on,
     users: snapshot,
-    self: null,
 
     join(nick) {
-      const me = { id: "me", name: nick, self: true, voice: false, joinedAt: Date.now() };
-      this.self = me;
-      users.push(me);
-      push();
-      bus.emit("message", {
-        id: "s" + (++seq), userId: me.id, system: true,
-        text: `${me.name} joined the circle`
-      });
+      users.push({ id: "me", name: nick, self: true, voice: false });
+      bus.emit("presence", snapshot());
+      bus.emit("message", { id: "s" + (++seq), userId: "me", system: true,
+                            text: `${nick} joined the circle` });
     },
-
     say(text) {
-      if (!this.self || !text.trim()) return;
-      bus.emit("message", { id: "m" + (++seq), userId: this.self.id, text: text.trim() });
+      const body = (text || "").trim();
+      if (body) bus.emit("message", { id: "m" + (++seq), userId: "me", text: body });
     },
-
     setVoice(on) {
-      if (!this.self) return;
-      const u = users.find((x) => x.id === "me");
-      if (u) u.voice = on;
-      push();
+      if (users[0]) users[0].voice = on;
+      bus.emit("presence", snapshot());
       bus.emit("voice", { userId: "me", on });
     }
   };
 }
 
-/* --- Real transport, for reference ---------------------------------
-function SocketTransport(url) {
-  const bus = Emitter();
-  const ws  = new WebSocket(url);
-  ws.onmessage = (e) => { const { type, data } = JSON.parse(e.data); bus.emit(type, data); };
-  const send = (type, data) => ws.readyState === 1 && ws.send(JSON.stringify({ type, data }));
-  return {
-    on: bus.on,
-    join:     (nick) => send("join", { nick }),
-    say:      (text) => send("message", { text }),
-    setVoice: (on)   => send("voice", { on })
-  };
+function createTransport() {
+  if (ROOM_SERVER) return SocketTransport(ROOM_SERVER, ROOM_ID);
+  if ("BroadcastChannel" in window) return ChannelTransport(ROOM_ID);
+  return LocalTransport();
 }
---------------------------------------------------------------------- */
 
-const net = LocalTransport();
+const net = createTransport();
 
 /* ==================================================================
    2. AUDIO — everything is synthesised, no asset files

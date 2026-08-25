@@ -1,0 +1,11 @@
+# One-click deploy of the relay: https://render.com/deploy
+# Render's free web services sleep after ~15 min idle and take ~50s to wake.
+services:
+  - type: web
+    name: bonfire-relay
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
