@@ -273,7 +273,7 @@
   <button class="btn" id="tWaves" aria-pressed="false">
     <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.4 10.2c1.1 0 1.1-1.5 2.2-1.5s1.1 1.5 2.2 1.5 1.1-1.5 2.2-1.5 1.1 1.5 2.2 1.5 1.1-1.5 2.2-1.5 1.1 1.5 2.2 1.5"/><path d="M1.4 13.4c1.1 0 1.1-1.5 2.2-1.5s1.1 1.5 2.2 1.5 1.1-1.5 2.2-1.5 1.1 1.5 2.2 1.5 1.1-1.5 2.2-1.5 1.1 1.5 2.2 1.5"/><path d="M4.6 6.1a3.4 3.4 0 0 1 6.5-1"/></svg>
     <span class="label">Ocean</span></button>
-  <span class="sep"></span>
+  <span class="sep" id="voiceSep"></span>
   <button class="btn" id="tVoice" aria-pressed="false">
     <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><rect x="6" y="1.4" width="4" height="7.6" rx="2"/><path d="M3.4 7.6a4.6 4.6 0 0 0 9.2 0"/><path d="M8 12.2v2.4"/></svg>
     <span class="label">Join Voice</span></button>
@@ -521,7 +521,11 @@ function SocketTransport(url) {
     ws.onclose = () => {
       if (leaving) return;                       // page is going away; do not reconnect
       status("offline");
-      setTimeout(connect, (backoff = Math.min(backoff * 2, 8000)));
+      // Cap the retry gap low. A sleeping relay becomes reachable at a moment
+      // we cannot predict, and every second between it waking and our next
+      // attempt is a second of someone staring at cold coals. Measured a
+      // 17s overshoot against an 8s cap.
+      setTimeout(connect, (backoff = Math.min(backoff * 2, 3000)));
     };
   })();
 
@@ -610,6 +614,7 @@ const FIRE_BED_URL = "data:audio/mpeg;base64,//vQRAABVVN8uwEmTlCnj8dwGSZwVdH2/QS
 const Audio_ = {
   ctx: null, master: null, beds: {}, started: false, crackleTimer: 0,
   recorded: false,
+  _life: 1, _fireBase: 0.5,
 
   noiseBuffer(ctx, seconds, brown) {
     const len = ctx.sampleRate * seconds;
@@ -861,7 +866,8 @@ const Audio_ = {
   tune(intensity) {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    this.beds.fire.target = 0.35 + intensity * 0.45;
+    this._fireBase = 0.35 + intensity * 0.45;
+    this.beds.fire.target = this._fireBase * (0.10 + this._life * 0.90);
     if (this.beds.fire.on) {
       this.beds.fire.gain.gain.setTargetAtTime(this.beds.fire.target, t, 0.6);
     }
@@ -871,10 +877,22 @@ const Audio_ = {
     }
   },
 
+  /* Unlit coals should sound like coals: the bed drops with the fire's life
+     and comes back up as it catches. */
+  setFireLife(life) {
+    this._life = life;
+    if (!this.ctx || !this.beds.fire) return;
+    this.beds.fire.target = this._fireBase * (0.10 + life * 0.90);
+    if (this.beds.fire.on) {
+      this.beds.fire.gain.gain.setTargetAtTime(this.beds.fire.target, this.ctx.currentTime, 0.5);
+    }
+  },
+
   /* Called every frame: crackle rate rises with the fire.
      A recording brings its own crackles, so this stands down. */
   tick(dt, intensity) {
     if (!this.ctx || !this.beds.fire.on || this.recorded) return;
+    if (life < 0.35) return;             // coals do not crackle much
     this.crackleTimer -= dt;
     if (this.crackleTimer <= 0) {
       this.crackle(intensity);
@@ -893,6 +911,14 @@ const Audio_ = {
    extra infrastructure at all — the relay already carrying presence carries
    the signalling, and the audio never touches it.
 ================================================================== */
+/* Voice is built and works — a WebRTC mesh with push-to-talk — but it is
+   switched off until there is a TURN server behind it. Without TURN, people
+   on stricter networks appear "in voice" while no audio ever arrives, and a
+   feature that silently fails is worse than one that is honestly absent.
+   Flip this to true once TURN is configured; nothing else needs to change,
+   and the relay already routes the signalling. */
+const VOICE_ENABLED = false;
+
 const ICE_SERVERS = [
   { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }
 ];
@@ -1075,6 +1101,15 @@ const GLOW_SPR  = makeSprite("255,146,52", 256);
 let users = [];                 // [{id,name,self,voice,seat:{...}}]
 let intensity = 0.25;           // smoothed 0..1+, drives everything
 let targetIntensity = 0.25;
+
+/* How ALIVE the fire is, separate from how big it is.
+   0 = cold coals, 1 = burning. A relay on a free tier sleeps and takes the
+   better part of a minute to wake, so rather than sit on a dead screen the
+   fire starts as embers and visibly catches the moment the connection lands.
+   With no relay configured there is nothing to wait for, so it is lit from
+   the start. */
+let life = ROOM_SERVER ? 0.05 : 1;
+let lifeTarget = life;
 let flicker = 1, flickerVel = 0;
 let micLevel = 0;               // local mic amplitude 0..1
 const fire = { x: 0, y: 0, scale: 1 };
@@ -1162,7 +1197,7 @@ function drawFigure(u, t) {
   const breathe = 1 + Math.sin(t * 0.9 + phase) * 0.012;
 
   // voice ring — pulses with mic level for you, gently for others
-  if (u.voice) {
+  if (u.voice && VOICE_ENABLED) {
     // Real level where we have their audio; a gentle idle pulse until then,
     // so a connecting peer still reads as "in voice".
     const heard = u.self ? micLevel : Voice.levelOf(u.id);
@@ -1228,14 +1263,17 @@ function drawName(u) {
 }
 
 /* --- logs ----------------------------------------------------------- */
-function drawLogs() {
+function drawLogs(t) {
   const s = fire.scale;
+  // Coals stay warm even with no flame, and breathe slowly while they wait.
+  const breath = life < 0.6 ? 0.78 + 0.22 * Math.sin(t * 1.15) : 1;
+  const coal = (0.55 + life * 0.45) * breath;
   ctx.save();
   ctx.translate(fire.x, fire.y + 10);
   // coal bed under the logs
   ctx.globalCompositeOperation = "lighter";
   const cg = ctx.createRadialGradient(0, 0, 2, 0, 0, 44 * s);
-  cg.addColorStop(0, `rgba(255,146,48,${0.42 * flicker})`);
+  cg.addColorStop(0, `rgba(255,146,48,${0.42 * flicker * coal})`);
   cg.addColorStop(1, "rgba(255,80,20,0)");
   ctx.fillStyle = cg;
   ctx.beginPath(); ctx.ellipse(0, 2 * s, 46 * s, 15 * s, 0, 0, TAU); ctx.fill();
@@ -1267,8 +1305,8 @@ function drawFire(dt, t) {
   // ambient glow pool
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
-  const R = (120 + intensity * 210) * flicker;
-  ctx.globalAlpha = 0.16 + intensity * 0.20;
+  const R = (120 + intensity * 210) * flicker * (0.45 + life * 0.55);
+  ctx.globalAlpha = (0.16 + intensity * 0.20) * (0.18 + life * 0.82);
   ctx.drawImage(GLOW_SPR, fire.x - R, fire.y - R * 0.85 - 46, R * 2, R * 1.7);
   ctx.restore();
 
@@ -1281,8 +1319,8 @@ function drawFire(dt, t) {
   ctx.translate(fire.x, fire.y + 16);
   ctx.scale(1, 0.38);
   const gl = ctx.createRadialGradient(0, 0, 6, 0, 0, gr);
-  gl.addColorStop(0,    `rgba(255,138,48,${0.13 + intensity * 0.11})`);
-  gl.addColorStop(0.45, `rgba(214,92,26,${0.045 + intensity * 0.05})`);
+  gl.addColorStop(0,    `rgba(255,138,48,${(0.13 + intensity * 0.11) * (0.22 + life * 0.78)})`);
+  gl.addColorStop(0.45, `rgba(214,92,26,${(0.045 + intensity * 0.05) * (0.22 + life * 0.78)})`);
   gl.addColorStop(1,    "rgba(150,58,12,0)");
   ctx.fillStyle = gl;
   ctx.beginPath();
@@ -1290,7 +1328,7 @@ function drawFire(dt, t) {
   ctx.fill();
   ctx.restore();
 
-  drawLogs();
+  drawLogs(t);
 
   // smoke (under the flames, drifting up)
   ctx.save();
@@ -1328,9 +1366,11 @@ function drawFire(dt, t) {
 function stepParticles(dt) {
   const budget = REDUCED ? 0.4 : 1;
   // spawn rates scale with the fire, i.e. with the crowd
-  const flameRate = (52 + intensity * 190) * budget;
-  const emberRate = (3 + intensity * 22) * budget;
-  const smokeRate = (2 + intensity * 7) * budget;
+  // Coals still throw the odd spark and a thread of smoke; flames are what
+  // actually go out, so only they scale all the way down.
+  const flameRate = (52 + intensity * 190) * budget * life;
+  const emberRate = (3 + intensity * 22) * budget * (0.22 + life * 0.78);
+  const smokeRate = (2 + intensity * 7) * budget * (0.45 + life * 0.55);
   spawnAcc.f += flameRate * dt; spawnAcc.e += emberRate * dt; spawnAcc.s += smokeRate * dt;
   while (spawnAcc.f >= 1) { spawnFlame(); spawnAcc.f--; }
   while (spawnAcc.e >= 1) { spawnEmber(); spawnAcc.e--; }
@@ -1364,6 +1404,10 @@ function frame(now) {
   intensity += (targetIntensity - intensity) * Math.min(1, dt * 1.6);
   fire.scale = 0.45 + intensity * 1.30;
 
+  // Catching is quicker than dying back, the way a real fire takes.
+  life += (lifeTarget - life) * Math.min(1, dt * (lifeTarget > life ? 1.1 : 2.4));
+  if (Math.abs(life - audioLife) > 0.02) { audioLife = life; Audio_.setFireLife(life); }
+
   // organic flicker (spring + noise)
   flickerVel += (1 - flicker) * 14 * dt + rand(-1, 1) * 5.5 * dt;
   flickerVel *= 0.90;
@@ -1390,6 +1434,19 @@ function frame(now) {
   positionSays(now);
 
   requestAnimationFrame(frame);
+}
+
+/* The moment the relay answers: a puff of sparks and the flames take. */
+function catchFire() {
+  if (lifeTarget >= 1) return;
+  lifeTarget = 1;
+  flicker = 1.3;
+  for (let i = 0; i < 44; i++) {
+    spawnEmber();
+    const e = embers[embers.length - 1];
+    e.vy *= rand(1.2, 2.1);            // thrown up harder than a lazy ember
+    e.ttl *= rand(0.6, 1.0);
+  }
 }
 
 /* --- starfield ------------------------------------------------------- */
@@ -1484,20 +1541,41 @@ function positionSays(now) {
    minute. Say so, rather than showing an empty clearing and looking broken. */
 let linkState = ROOM_SERVER ? "connecting" : "online";
 let seated = false;                    // admitted to a circle yet?
+let waiting = false;                   // asked to join, not yet admitted
+let waitingSince = 0;
+let audioLife = 1;
 
 function renderPresence() {
   const el = $("#presence");
-  if (linkState === "offline") { el.textContent = "reconnecting…"; return; }
+  // `waiting` wins over the link state on purpose. A sleeping relay refuses
+  // the connection while it boots, so the socket reports "offline" and the
+  // retry loop flips it back and forth — but from the visitor's side this is
+  // one continuous wait to get in, and "reconnecting" is a lie when you have
+  // never been connected.
+  if (waiting) {
+    // The relay sleeps when the fire goes out and takes about a minute to
+    // wake. Say so once the wait is clearly a cold start, rather than
+    // leaving someone to wonder whether it is broken.
+    const held = (performance.now() - waitingSince) / 1000;
+    el.textContent =
+      held > 75 ? "still can't reach the others — the relay may be down" :
+      held > 7  ? "the fire has been out a while — coaxing it back" :
+                  "finding the others…";
+    return;
+  }
+  if (linkState === "offline") { el.textContent = seated ? "reconnecting…" : ""; return; }
   if (!seated) {
     // Nothing is counted until you sit down: the relay does not tell a
     // client who is present until it joins, so any number here would be a
-    // guess. Report the connection instead.
-    el.textContent = linkState === "connecting" ? "finding the others…" : "";
+    // guess. Say nothing rather than guess.
+    el.textContent = "";
     return;
   }
   const n = users.length;
   el.textContent = n === 1 ? "1 person at the fire" : `${n} people at the fire`;
 }
+
+setInterval(() => { if (waiting) renderPresence(); }, 1000);
 
 net.on("status", (s) => { linkState = s.state; renderPresence(); });
 
@@ -1509,10 +1587,10 @@ net.on("presence", (list) => {
   targetIntensity = intensityFor(users.length);
   Audio_.tune(targetIntensity);
   renderPresence();
-  Voice.sync();          // connect to new speakers, drop the ones who muted
+  if (VOICE_ENABLED) Voice.sync();   // connect to new speakers, drop the muted
 });
 net.on("message", addSay);
-net.on("signal", ({ from, data }) => Voice.onSignal(from, data));
+net.on("signal", ({ from, data }) => { if (VOICE_ENABLED) Voice.onSignal(from, data); });
 
 /* A note only you see. Errors about your own microphone are nobody else's
    business, and broadcasting them put them in everyone's chat. */
@@ -1538,6 +1616,12 @@ $("#privToggle").addEventListener("click", () => {
   if (opening) key.focus();
 });
 
+function restoreGate() {
+  const g = $("#gate");
+  g.style.display = "";
+  requestAnimationFrame(() => g.classList.remove("gone"));
+}
+
 function dismissGate() {
   $("#gate").classList.add("gone");
   // Deliberately does NOT focus the chat box. Space is push-to-talk, and a
@@ -1550,8 +1634,10 @@ let privateCircle = false;
 
 net.on("joined", () => {
   seated = true;
+  waiting = false;
+  catchFire();               // the flames take
   renderPresence();
-  dismissGate();
+  dismissGate();             // no-op if we already stepped through
 
   /* A mistyped key does not fail — it derives a different circle, which is
      indistinguishable from an empty one. That is deliberate: it denies an
@@ -1568,6 +1654,8 @@ net.on("joined", () => {
 net.on("denied", () => {
   // Never admitted, so nothing to leave. Put the visitor back at the door.
   seated = false;
+  waiting = false;
+  restoreGate();
   $("#joinBtn").disabled = false;
   $("#joinBtn").textContent = "Open the circle";
   gateError("that key does not match this circle");
@@ -1601,8 +1689,18 @@ $("#joinForm").addEventListener("submit", async (e) => {
   privateCircle = !!key;
   Audio_.start();                // must happen inside a user gesture
   Audio_.bedOn("fire", true);
+  waiting = true;
+  waitingSince = performance.now();
   net.join(nick, circle);
   btn.disabled = false;
+
+  // Step through to the clearing straight away rather than holding someone
+  // at a dialog while a sleeping relay wakes. The fire is there, just not
+  // lit yet — and it catches the moment the connection lands. A refusal is
+  // rare enough (a wrong key derives a different circle rather than being
+  // rejected) that putting the gate back on `denied` is the right trade.
+  renderPresence();
+  dismissGate();
 });
 
 /* --- composer --- */
@@ -1634,7 +1732,18 @@ function typing() {
 
 /* --- voice --- */
 let micAnalyser = null, micData = null;
-toggle($("#tVoice"), async (on) => {
+
+if (!VOICE_ENABLED) {
+  // Take the controls out of the DOM rather than hiding them: a disabled
+  // button people can still see is an invitation to wonder why it does
+  // nothing. The separator goes too, or it dangles at the end of the dock.
+  ["#tVoice", "#ptt", "#voiceSep"].forEach((sel) => {
+    const el = $(sel);
+    if (el) el.remove();
+  });
+}
+
+if (VOICE_ENABLED) toggle($("#tVoice"), async (on) => {
   const btn = $("#tVoice"), label = btn.querySelector(".label");
 
   if (!on) {
@@ -1694,6 +1803,7 @@ function pollMic() {
    swallowed by a text field — has to be handled, because a microphone
    nobody realises is live is the worst possible failure here. */
 function setTalking(on) {
+  if (!VOICE_ENABLED) return;
   if (on && !Voice.on) return;
   if (Voice.talking === !!on) return;
   Voice.transmit(on);
@@ -1701,29 +1811,31 @@ function setTalking(on) {
   if (!Voice.talking) micLevel = 0;
 }
 
-addEventListener("keydown", (e) => {
-  if (e.code !== "Space" || e.repeat || typing()) return;
-  e.preventDefault();               // Space would otherwise scroll the page
-  wake();
-  setTalking(true);
-});
-addEventListener("keyup", (e) => {
-  if (e.code !== "Space") return;
-  setTalking(false);
-});
+if (VOICE_ENABLED) {
+  addEventListener("keydown", (e) => {
+    if (e.code !== "Space" || e.repeat || typing()) return;
+    e.preventDefault();             // Space would otherwise scroll the page
+    wake();
+    setTalking(true);
+  });
+  addEventListener("keyup", (e) => {
+    if (e.code !== "Space") return;
+    setTalking(false);
+  });
 
-// Any loss of focus or visibility closes the mic rather than leaving it live.
-addEventListener("blur", () => setTalking(false));
-document.addEventListener("visibilitychange", () => { if (document.hidden) setTalking(false); });
+  // Any loss of focus or visibility closes the mic rather than leaving it live.
+  addEventListener("blur", () => setTalking(false));
+  document.addEventListener("visibilitychange", () => { if (document.hidden) setTalking(false); });
 
-const pttBtn = $("#ptt");
-pttBtn.addEventListener("pointerdown", (e) => {
-  e.preventDefault();
-  pttBtn.setPointerCapture(e.pointerId);      // keep the release even if we slide off
-  setTalking(true);
-});
-["pointerup", "pointercancel", "lostpointercapture"].forEach((evt) =>
-  pttBtn.addEventListener(evt, () => setTalking(false)));
+  const pttBtn = $("#ptt");
+  pttBtn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    pttBtn.setPointerCapture(e.pointerId);    // keep the release even if we slide off
+    setTalking(true);
+  });
+  ["pointerup", "pointercancel", "lostpointercapture"].forEach((evt) =>
+    pttBtn.addEventListener(evt, () => setTalking(false)));
+}
 
 /* --- auto-hiding chrome --- */
 let idleTimer = 0;
@@ -1754,7 +1866,9 @@ window.bonfire = {
   audio:     Audio_,
   voice:     Voice,
   users:     () => users,
-  intensity: () => ({ now: intensity, target: targetIntensity, scale: fire.scale })
+  intensity: () => ({ now: intensity, target: targetIntensity, scale: fire.scale }),
+  life:      () => ({ life, lifeTarget, waiting, seated, linkState }),
+  particles: () => ({ flames: parts.length, embers: embers.length, smoke: smokes.length })
 };
 
 /* --- go --- */

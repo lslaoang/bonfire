@@ -10,9 +10,13 @@ it, and shrinks back down when they leave.
 else who has it open — real presence, real messages, one fire that grows with
 the crowd. Nothing is simulated and nothing is padded.
 
-The relay runs on a free tier and sleeps when the fire goes out, so the first
-person to arrive after a quiet spell waits while it wakes. The page says
-*finding the others…* rather than pretending the clearing is empty.
+The relay runs on a free tier and sleeps when the fire goes out. Rather than
+hold you at a dialog while it wakes, you step straight through to the
+clearing and find the fire down to embers — coals glowing, a thread of smoke,
+no flame. It catches, with a puff of sparks, the moment the connection lands.
+The wait is honest rather than hidden: the readout escalates from *finding
+the others…* to *the fire has been out a while — coaxing it back*, and after
+75s admits the relay may simply be down.
 
 ---
 
@@ -50,9 +54,9 @@ To add a feature, hang it off `I`. Don't add another counter.
   like smoke, gone by 12.5s. Tune `SAY_LIFE` and `SAY_FADE` in `index.html`.
   Nothing is persisted and late joiners see nothing; that's the product, not
   a limitation.
-- **Push-to-talk voice** — real peer-to-peer audio over WebRTC. Hold **Space**
-  (or the *Hold to talk* pad) to open your mic; it is closed the rest of the
-  time. Each person's ring pulses with what you are actually hearing.
+- **Voice — built, currently switched off.** A WebRTC push-to-talk mesh is
+  implemented and working, but `VOICE_ENABLED` is `false` until there is a
+  TURN server behind it. See *Voice* below.
 - **Private circles** — open one with a shared key and it is reachable only
   by people who know that key.
 - **Auto-hiding UI** — chrome fades after 3s idle, and won't hide mid-sentence.
@@ -108,6 +112,13 @@ middle instead. Presence and chat would not change: only `Voice` would.
 Connections are reconciled against the roster on every presence update, so
 joining, leaving and muting are all one code path. Of any two peers the lower
 id places the call, so both sides never offer at once.
+
+**Voice is currently disabled** (`VOICE_ENABLED = false` in `index.html`).
+Everything below is implemented and tested, and the relay already routes the
+signalling — it is off only because there is no TURN server yet, and without
+one people on stricter networks appear "in voice" while no audio arrives. A
+feature that fails silently is worse than one that is honestly absent.
+Setting the flag to `true` restores the controls; nothing else changes.
 
 Voice is **push-to-talk**: joining voice establishes the connections but
 leaves your outgoing track disabled. Holding Space — or the *Hold to talk*
@@ -258,7 +269,8 @@ wedges in the corners.
 
 ## Debugging
 
-`window.bonfire` exposes `net`, `audio`, `voice`, `users()` and `intensity()`.
+`window.bonfire` exposes `net`, `audio`, `voice`, `users()`, `intensity()`,
+`life()` (the fire's kindling state) and `particles()`.
 
 To exercise voice without a microphone, stub `getUserMedia` with a synthetic
 stream from `AudioContext.createMediaStreamDestination()` — it is a real
